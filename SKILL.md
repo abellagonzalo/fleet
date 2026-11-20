@@ -52,6 +52,6 @@ To **steer mid-turn**, `fleet send --now` sends Ctrl+Enter: the worker drops the
 
 ## Shared pane etiquette
 
-- `fleet send` refuses when the prompt box holds text (the user typed it) or a dialog is open. Report what is there and ask; `--force` only on the user's say-so.
+- `fleet send` refuses when the prompt box holds text (the user typed it), a dialog is open, or there is no prompt box (claude exited). Report what is there and ask; `--force` only on the user's say-so, and it only appends to typed text: it never types into a dialog. Claude Code's grey suggested prompt is not typed text; `send` replaces it.
 - Leave workers running when you finish a task.
 - `fleet rm <worker>` kills the window and removes the worktree only when it is clean (it lists the changes and refuses otherwise; `--force` discards them, on the user's word). The branch always stays.
