@@ -29,6 +29,8 @@ class RealCaptures(unittest.TestCase):
         "permission_dialog_bash": ("dialog", False, False, None, None),
         "ask_user_question": ("dialog", False, False, None, None),
         "trust_dialog": ("dialog", False, True, None, None),
+        # `claude --name w1` labels the rule above the box: "──────── w1 ─"
+        "named_session": ("quiet", True, False, "", 'Try "fix typecheck errors"'),
     }
 
     def check(self, name, ansi):

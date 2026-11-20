@@ -6,7 +6,7 @@ is tested against saved captures of real screens (tests/fixtures).
 The landmarks, as Claude Code 2.1 draws them:
 
     ✶ Elucidating… (2s · ↓ 186 tokens · thinking)      <- spinner line while a turn runs
-    ────────────────────────────────────────────────    <- rule
+    ─────────────────────────────────────── name ─    <- rule (labelled when claude has --name)
     ❯ typed text, or a dim placeholder / suggestion     <- prompt box (may wrap onto indented lines)
     ────────────────────────────────────────────────    <- rule
       ⏸ manual mode on · esc to interrupt               <- footer; "esc to interrupt" while busy
@@ -190,8 +190,9 @@ class Screen:
 
 
 def _is_rule(text):
-    t = text.strip()
-    return len(t) >= 10 and t == RULE_CHAR * len(t)
+    """A horizontal rule. The one above the prompt box carries the session name when claude runs
+    with --name ("──────── w1 ─"), so only the start of the row is checked."""
+    return text.lstrip().startswith(RULE_CHAR * 10)
 
 
 def _box_text(rows):
