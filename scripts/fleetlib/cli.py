@@ -25,6 +25,7 @@ CTRL_ENTER = "\x1b[13;5u"  # Ctrl+Enter as CSI-u: interrupt the turn and run the
 
 HELP = """\
 fleet up [name] [--detach] [-- claude args]   create tmux session fleet[-name], orchestrator claude in window 0 'orch'
+    --mode M             orchestrator permission mode (default auto)
 fleet new <repo|repo/main> <branch> [opts]     worker window <branch> in worktree <repo>/<branch> (reused if present;
                                                else new branch from fetched origin default), made with wt; its hooks
                                                run in the foreground before claude starts. Exit 3: folder-trust dialog.
@@ -242,7 +243,8 @@ def cmd_up(ctx, argv):
         raise FleetError("tmux did not report the new session's pane")
     style_window(ctx, pane)
     ctx.tmux.set_pane_option(pane, "@fleet_role", "orch")
-    cmd = ["claude", "/fleet", "--name", s, "--allowedTools", "Bash(%s *)" % ctx.fleet_path] + o["extra"]
+    cmd = ["claude", "/fleet", "--name", s, "--permission-mode", o["mode"],
+           "--allowedTools", "Bash(%s *)" % ctx.fleet_path] + o["extra"]
     ctx.tmux.send_literal(pane, _shell_line(cmd, ctx), orch_ok=True)
     ctx.tmux.send_keys(pane, "Enter", orch_ok=True)
     if not o["detach"] and not ctx.environ.get("TMUX") and ctx.isatty():

@@ -28,13 +28,16 @@ def _int(s, what):
 
 
 def parse_up(args):
-    usage = "usage: fleet up [name] [--detach] [-- claude args]"
-    o = {"name": "", "detach": False, "extra": []}
+    usage = "usage: fleet up [name] [--detach] [--mode M] [-- claude args]"
+    o = {"name": "", "detach": False, "mode": "auto", "extra": []}
     i = 0
     while i < len(args):
         a = args[i]
         if a == "--detach":
             o["detach"] = True
+        elif a == "--mode":
+            o["mode"] = _value(args, i, a)
+            i += 1
         elif a == "--":
             o["extra"] = args[i + 1:]
             break

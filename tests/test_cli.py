@@ -17,10 +17,10 @@ from fleetlib.errors import FleetError
 
 class Args(unittest.TestCase):
     def test_up(self):
-        self.assertEqual(A.parse_up([]), {"name": "", "detach": False, "extra": []})
-        self.assertEqual(A.parse_up(["x", "--detach", "--", "--model", "opus"]),
-                         {"name": "x", "detach": True, "extra": ["--model", "opus"]})
-        for bad in (["a", "b"], ["--nope"]):
+        self.assertEqual(A.parse_up([]), {"name": "", "detach": False, "mode": "auto", "extra": []})
+        self.assertEqual(A.parse_up(["x", "--detach", "--mode", "manual", "--", "--model", "opus"]),
+                         {"name": "x", "detach": True, "mode": "manual", "extra": ["--model", "opus"]})
+        for bad in (["a", "b"], ["--nope"], ["--mode"]):
             with self.assertRaises(A.UsageError):
                 A.parse_up(bad)
 
@@ -719,7 +719,7 @@ class Up(unittest.TestCase):
         self.assertEqual((pane.session, pane.window), ("fleet-x", "orch"))
         self.assertEqual(tmux.pane_options[(pane.id, "@fleet_role")], "orch")
         self.assertEqual(pane.submitted[0][0],
-                         "claude /fleet --name fleet-x --allowedTools 'Bash(/opt/fleet/scripts/fleet *)' --model opus")
+                         "claude /fleet --name fleet-x --permission-mode auto --allowedTools 'Bash(/opt/fleet/scripts/fleet *)' --model opus")
         self.assertEqual(cli.run(ctx, ["up", "x"]), 1)
         self.assertIn("session 'fleet-x' already exists", ctx.err.getvalue())
 
