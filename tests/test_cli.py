@@ -530,6 +530,28 @@ class LastAndRead(Fleet):
         self.assertEqual(self.run_cmd("last", "alpha")[1], "two\nlines\n----\n")
         self.assertEqual(self.run_cmd("last", "alpha", "5")[1], "one\n----\ntwo\nlines\n----\n")
 
+    def test_last_waits_for_the_transcript_to_catch_up(self):
+        # Seen live: Stop fired (last_message "new") ~0.2s before the transcript had the reply.
+        tp = os.path.join(self.dir, "t.jsonl")
+        entry = lambda t: json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": t}]}}) + "\n"
+        with open(tp, "w") as f:
+            f.write(entry("old"))
+        self.track(self.a, transcript_path=tp, event="Stop", last_message="new")
+
+        def flush(t):
+            with open(tp, "a") as f:
+                f.write(entry("new"))
+            self.clock.on_sleep = None
+        self.clock.on_sleep = flush
+        self.assertEqual(self.run_cmd("last", "alpha")[1], "new\n----\n")
+
+    def test_last_falls_back_to_the_hook_copy(self):
+        tp = os.path.join(self.dir, "t.jsonl")
+        with open(tp, "w") as f:
+            f.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "old"}]}}) + "\n")
+        self.track(self.a, transcript_path=tp, event="Stop", last_message="new")
+        self.assertEqual(self.run_cmd("last", "alpha", "2")[1], "old\n----\nnew\n----\n")
+
     def test_last_without_transcript(self):
         self.assertEqual(self.run_cmd("last", "alpha")[1], "(no reply yet)\n")
         self.track(self.a, last_message="from the hook")

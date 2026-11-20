@@ -568,13 +568,16 @@ def cmd_read(ctx, argv):
     return 0
 
 
+TRANSCRIPT_LAG = 2.0  # how long the transcript may trail the Stop hook
+
+
 def last(ctx, name, n):
     _, _, rec = tracked(ctx, name)
     tp = rec.get("transcript_path") or ""
     if not tp or not os.path.isfile(tp):
         ctx.say(rec.get("last_message") or "(no reply yet)")
         return 0
-    replies = transcript_replies(tp)
+    replies = settled_replies(ctx, tp, rec)
     picked = replies[-n:] if n > 0 else []
     if not picked:
         ctx.say("(no reply yet)")
@@ -582,6 +585,27 @@ def last(ctx, name, n):
     for r in picked:
         ctx.say(r, "----")
     return 0
+
+
+def settled_replies(ctx, tp, rec):
+    """The transcript's replies, once it holds the reply the Stop hook reported. The Stop hook can
+    fire before Claude Code has written that reply to the transcript, so right after `fleet wait` the
+    transcript's last reply may still be the previous turn's. Re-read for a moment; if it never
+    shows up, use the hook's copy."""
+    want = (rec.get("last_message") or "").strip() if rec.get("event") == "Stop" else ""
+    deadline = ctx.monotonic() + TRANSCRIPT_LAG
+    while True:
+        replies = transcript_replies(tp)
+        if not want or any(_same_reply(want, r) for r in replies[-3:]):
+            return replies
+        if ctx.monotonic() >= deadline:
+            return replies + [rec["last_message"]]
+        ctx.sleep(0.2)
+
+
+def _same_reply(hook_text, transcript_text):
+    a, b = S.compact(hook_text), S.compact(transcript_text)
+    return bool(a) and bool(b) and (a in b or b in a)
 
 
 def transcript_replies(path):
