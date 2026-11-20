@@ -70,6 +70,7 @@ class FakeTmux(Tmux):
 
     # ---- setup ----
     def add(self, session, window, pane_id=None, **kw):
+        """A pane; role="orch" marks an orchestrator."""
         if pane_id is None:
             pane_id = "%%%d" % self.next_id
             self.next_id += 1
@@ -105,8 +106,10 @@ class FakeTmux(Tmux):
             return None
         return {p.id: p.fleet_name for p in self.panes_.values()}
 
-    def pane_exists(self, pane_id):
-        return pane_id in self.panes_
+    def pane_role(self, pane):
+        if pane not in self.panes_:
+            raise FleetError("can't find pane %s" % pane)
+        return self.panes_[pane].role
 
     def capture(self, pane, ansi=False, scrollback=0):
         if not pane:
@@ -147,6 +150,8 @@ class FakeTmux(Tmux):
         self.pane_options[(target, name)] = value
         if name == "@fleet_name" and target in self.panes_:
             self.panes_[target].fleet_name = value
+        if name == "@fleet_role" and target in self.panes_:
+            self.panes_[target].role = value
 
     def new_session(self, name, window, cwd, width=200, height=50):
         return self.add(name, window).id

@@ -192,7 +192,27 @@ class Target(Fleet):
 
     def test_raw_pane_id(self):
         self.assertEqual(cli.target(self.ctx, "%2"), "%2")
-        self.assertEqual(cli.target(self.ctx, "%9"), "%9")
+
+    def test_raw_pane_id_of_another_session(self):
+        with self.assertRaisesRegex(FleetError, "no worker '%9' in fleet session 'fleet'"):
+            cli.target(self.ctx, "%9")
+
+    def test_orchestrator_of_another_fleet(self):
+        # The live slip that shaped this rule: a test fleet (FLEET_SESSION=fleet-test) driven from a
+        # worker pane (%3) of the real fleet; "%0" is the real fleet's orchestrator.
+        tmux = FakeTmux(own_pane="%3")
+        tmux.add("fleet", "orch", "%0", role="orch")
+        tmux.add("fleet", "me", "%3", fleet_name="me")
+        tmux.add("fleet-test", "orch", "%4", role="orch")
+        tmux.add("fleet-test", "w1", "%5", fleet_name="w1")
+        ctx = make_ctx(tmux, self.dir, environ={"TMUX_PANE": "%3", "FLEET_SESSION": "fleet-test"})
+        self.assertEqual(cli.target(ctx, "w1"), "%5")
+        for name in ("%0", "%3", "%4", "orch", "me"):
+            with self.assertRaises(FleetError, msg=name):
+                cli.target(ctx, name)
+        for argv in (["send", "%0", "hi"], ["keys", "%0", "Enter"], ["broadcast", "--to", "%0,orch,%3", "hi"]):
+            cli.run(ctx, argv)
+        self.assertEqual([c for c in tmux.calls if c and c[0] == "send-keys"], [])
 
     def test_unknown_pane_id(self):
         with self.assertRaisesRegex(FleetError, "no worker '%77'"):
@@ -207,7 +227,7 @@ class Target(Fleet):
     def test_no_session_and_unknown_name(self):
         tmux = FakeTmux(own_pane="")
         ctx = make_ctx(tmux, self.dir, environ={"TMUX_PANE": "", "TMUX": ""})
-        with self.assertRaisesRegex(FleetError, "^no worker 'alpha'$"):
+        with self.assertRaisesRegex(FleetError, "no fleet session running"):
             cli.target(ctx, "alpha")
 
     def test_no_command_types_into_the_orchestrator(self):
@@ -219,6 +239,13 @@ class Target(Fleet):
             self.assertTrue(err.startswith("fleet: "), argv)
         self.assertEqual(self.tmux.keys_sent_to("%0"), [])
         self.assertEqual(self.tmux.keys_sent_to(""), [])
+
+    def test_system_layer_refuses_orchestrators_even_when_not_our_pane(self):
+        self.tmux.own_pane = "%9"
+        for send in (lambda: self.tmux.send_keys("%0", "Enter"), lambda: self.tmux.send_literal("%0", "x")):
+            with self.assertRaisesRegex(FleetError, "an orchestrator's pane"):
+                send()
+        self.assertEqual(self.tmux.keys_sent_to("%0"), [])
 
     def test_system_layer_refuses_own_and_empty_panes(self):
         for pane in ("%0", "", "fleet:0"):

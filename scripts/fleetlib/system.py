@@ -40,6 +40,7 @@ class Tmux:
     def __init__(self, own_pane=None):
         # The pane this command runs in (the orchestrator, when it is the caller). Never a target.
         self.own_pane = own_pane if own_pane is not None else os.environ.get("TMUX_PANE", "")
+        self._checked = set()  # panes verified not to be an orchestrator
 
     def _tmux(self, *args, check=True):
         return _run(["tmux"] + list(args), check=check)
@@ -75,10 +76,6 @@ class Tmux:
                 res[pid] = name
         return res
 
-    def pane_exists(self, pane_id):
-        p = self._tmux("display", "-p", "-t", _target(pane_id), "#{pane_id}", check=False)
-        return p.returncode == 0 and p.stdout.strip() == pane_id
-
     def capture(self, pane, ansi=False, scrollback=0):
         args = ["capture-pane", "-p", "-t", _target(pane)]
         if ansi:
@@ -89,20 +86,29 @@ class Tmux:
 
     # ---- changes ----
 
-    def _pane_for_keys(self, pane):
+    def pane_role(self, pane):
+        """The pane's @fleet_role ("orch" for an orchestrator, else "")."""
+        return self._tmux("display", "-p", "-t", _target(pane), "#{@fleet_role}").stdout.strip()
+
+    def _pane_for_keys(self, pane, orch_ok=False):
         _target(pane)
         if not pane.startswith("%"):
             raise FleetError("internal: keys go to pane ids only, not %r" % pane)
         if self.own_pane and pane == self.own_pane:
             raise FleetError("internal: refusing to send keys to this pane (%s), the caller's own" % pane)
+        if not orch_ok:
+            if pane not in self._checked:
+                if self.pane_role(pane) == "orch":
+                    raise FleetError("internal: refusing to send keys to %s, an orchestrator's pane" % pane)
+                self._checked.add(pane)
         return pane
 
-    def send_keys(self, pane, *keys):
-        """tmux key names (Enter, Escape, Down, C-u...)."""
-        self._tmux("send-keys", "-t", self._pane_for_keys(pane), *keys)
+    def send_keys(self, pane, *keys, orch_ok=False):
+        """tmux key names (Enter, Escape, Down, C-u...). orch_ok only for `fleet up` starting one."""
+        self._tmux("send-keys", "-t", self._pane_for_keys(pane, orch_ok), *keys)
 
-    def send_literal(self, pane, text):
-        self._tmux("send-keys", "-t", self._pane_for_keys(pane), "-l", text)
+    def send_literal(self, pane, text, orch_ok=False):
+        self._tmux("send-keys", "-t", self._pane_for_keys(pane, orch_ok), "-l", text)
 
     def set_window_option(self, target, name, value, check=True):
         self._tmux("set", "-w", "-t", _target(target), name, value, check=check)

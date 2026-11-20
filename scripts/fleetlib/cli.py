@@ -122,29 +122,18 @@ def session(ctx):
 
 def target(ctx, name):
     """Worker name (window name in the fleet session) -> pane id. A raw pane id ("%12") is accepted
-    too. Never returns an empty id, the caller's own pane, or the orchestrator's."""
+    too, but only for a pane of the fleet session. Never returns an empty id, the caller's own pane,
+    or an orchestrator's (any pane marked @fleet_role=orch)."""
     if not name:
         raise FleetError("no worker name given")
-    s = None
-    pane = ""
-    role = ""
-    try:
-        s = session(ctx)
-    except FleetError:
-        pass
-    if s is not None:
-        for p in ctx.tmux.panes(s):
-            if p["window_name"] == name:
-                pane, role = p["pane_id"], p["@fleet_role"]
-                break
-    if not pane and re.match(r"^%\d+$", name) and ctx.tmux.pane_exists(name):
-        pane = name
-        if s is not None:
-            for p in ctx.tmux.panes(s):
-                if p["pane_id"] == name:
-                    role = p["@fleet_role"]
-    if not pane:
-        raise FleetError("no worker '%s'%s" % (name, " in fleet session '%s'" % s if s else ""))
+    s = session(ctx)
+    panes = ctx.tmux.panes(s)
+    match = [p for p in panes if p["window_name"] == name]
+    if not match and re.match(r"^%\d+$", name):
+        match = [p for p in panes if p["pane_id"] == name]
+    if not match or not match[0]["pane_id"]:
+        raise FleetError("no worker '%s' in fleet session '%s'" % (name, s))
+    pane, role = match[0]["pane_id"], match[0]["@fleet_role"]
     own = ctx.environ.get("TMUX_PANE", "")
     if own and pane == own:
         raise FleetError("'%s' resolves to this pane (the orchestrator), not a worker" % name)
@@ -254,8 +243,8 @@ def cmd_up(ctx, argv):
     style_window(ctx, pane)
     ctx.tmux.set_pane_option(pane, "@fleet_role", "orch")
     cmd = ["claude", "/fleet", "--name", s, "--allowedTools", "Bash(%s *)" % ctx.fleet_path] + o["extra"]
-    ctx.tmux.send_literal(pane, _shell_line(cmd, ctx))
-    ctx.tmux.send_keys(pane, "Enter")
+    ctx.tmux.send_literal(pane, _shell_line(cmd, ctx), orch_ok=True)
+    ctx.tmux.send_keys(pane, "Enter", orch_ok=True)
     if not o["detach"] and not ctx.environ.get("TMUX") and ctx.isatty():
         ctx.tmux.attach(s)
     ctx.say("fleet '%s' up: orchestrator in window 0 (%s)." % (s, cwd))
