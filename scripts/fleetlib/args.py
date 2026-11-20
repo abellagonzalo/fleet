@@ -53,7 +53,7 @@ NEW_USAGE = ("usage: fleet new <repo|repo/main> <branch> [--no-worktree] [--base
 
 
 def parse_new(args):
-    o = {"src": "", "name": "", "worktree": True, "base": "", "mode": "manual", "prompt_file": "",
+    o = {"src": "", "name": "", "worktree": True, "base": "", "mode": "auto", "prompt_file": "",
          "extra": []}
     i = 0
     while i < len(args):

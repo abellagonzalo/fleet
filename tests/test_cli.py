@@ -639,11 +639,11 @@ class New(Fleet):
         rec = st.Store.load(self.ctx.store.path(pane.id))
         self.assertEqual({k: rec[k] for k in ("name", "session", "pane", "dir", "repo", "worktree", "branch", "mode", "state")},
                          {"name": "feat", "session": "fleet", "pane": pane.id, "dir": self.new_wt, "repo": self.repo,
-                          "worktree": self.new_wt, "branch": "feat", "mode": "manual", "state": "busy"})
+                          "worktree": self.new_wt, "branch": "feat", "mode": "auto", "state": "busy"})
         self.assertEqual(self.tmux.pane_options[(pane.id, "@fleet_name")], "feat")
         launched, submitted = pane.submitted[0][0], pane.submitted[1][0]
         hooks = os.path.join(self.dir, "hooks.json")
-        self.assertEqual(launched, "FLEET_STATE_DIR=%s claude --name feat --permission-mode manual --settings %s --model haiku"
+        self.assertEqual(launched, "FLEET_STATE_DIR=%s claude --name feat --permission-mode auto --settings %s --model haiku"
                          % (self.dir, hooks))
         self.assertEqual(submitted, "Read %s and do what it says." % pf)
         self.assertIn("worktree %s on new branch feat from origin/main" % self.new_wt, out)

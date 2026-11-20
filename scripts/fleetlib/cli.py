@@ -30,7 +30,7 @@ fleet new <repo|repo/main> <branch> [opts]     worker window <branch> in worktre
                                                run in the foreground before claude starts. Exit 3: folder-trust dialog.
     --no-worktree        run in <dir> as given; <branch> is then just the worker name
     --base REF           branch from REF instead of origin's default branch
-    --mode M             permission mode (default manual)
+    --mode M             permission mode (default auto)
     --prompt-file P      once ready, send "Read P and do what it says."
     -- args              extra claude args
 fleet status [--json]                          every worker: state (busy|blocked|done|idle|exited), age, detail, last reply

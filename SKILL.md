@@ -32,7 +32,7 @@ State comes from Claude Code hooks; `status` and `wait` correct it from the scre
 `fleet new <repo> <branch>` opens window `<branch>` in the worktree `<repo>/<branch>`, next to `<repo>/main`, following the user's layout. It reuses that worktree or branch when it exists, and otherwise fetches origin and branches from its default branch. Worktrees are made and removed with `wt` (worktrunk), so the user's worktrunk hooks run: a new worktree's post-start hooks (e.g. a build that MCP servers need) finish before claude starts, so `fleet new` can take a minute.
 
 - **Choose the branch name** yourself: the Jira key when the work has one (`PROJ-123`), otherwise a short kebab-case slug (`fix-date-parsing`). Flat names only, since the name is also the directory.
-- `--no-worktree` runs in a directory as given (non-git directories, or the user wants no isolation). `--base REF`, `--mode M` (default `manual`), and extra claude args after `--` are on request.
+- `--no-worktree` runs in a directory as given (non-git directories, or the user wants no isolation). `--base REF`, `--mode M` (default `auto`), and extra claude args after `--` are on request.
 - `--prompt-file <path>` hands the worker its first task once it is ready; write the task to a file first.
 - **Exit 3 is the folder-trust dialog.** Trusting is the user's call: ask, and on yes run `fleet keys <branch> Down Enter`. Trust is inherited by subdirectories, so trusting the repo root once covers every future worktree.
 
