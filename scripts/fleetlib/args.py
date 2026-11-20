@@ -52,17 +52,19 @@ def parse_up(args):
 
 
 NEW_USAGE = ("usage: fleet new <repo|repo/main> <branch> [--no-worktree] [--base REF] [--mode M] "
-             "[--prompt-file P] [-- claude args]")
+             "[--prompt-file P | --prompt-stdin] [-- claude args]")
 
 
 def parse_new(args):
     o = {"src": "", "name": "", "worktree": True, "base": "", "mode": "auto", "prompt_file": "",
-         "extra": []}
+         "prompt_stdin": False, "extra": []}
     i = 0
     while i < len(args):
         a = args[i]
         if a == "--no-worktree":
             o["worktree"] = False
+        elif a == "--prompt-stdin":
+            o["prompt_stdin"] = True
         elif a in ("--base", "--mode", "--prompt-file"):
             o[a[2:].replace("-", "_")] = _value(args, i, a)
             i += 1
@@ -82,6 +84,8 @@ def parse_new(args):
         raise UsageError(NEW_USAGE)
     if not o["mode"]:
         raise UsageError("--mode needs a value")
+    if o["prompt_stdin"] and o["prompt_file"]:
+        raise UsageError("use --prompt-file or --prompt-stdin, not both")
     return o
 
 
@@ -94,32 +98,39 @@ def parse_status(args):
 
 
 def parse_send(args):
-    """Flags come before the worker; everything after it is the text (even words starting with -)."""
-    usage = "usage: fleet send [--now] [--force] <worker> <text>"
-    o = {"now": False, "force": False, "name": "", "text": ""}
+    """Flags come before the worker; everything after it is the text (even words starting with -).
+    With --prompt-file or --prompt-stdin the prompt comes from there, so nothing may follow the worker."""
+    usage = "usage: fleet send [--now] [--force] [--prompt-file P | --prompt-stdin] <worker> [<text>]"
+    o = {"now": False, "force": False, "prompt_file": "", "prompt_stdin": False, "name": "", "text": ""}
     i = 0
-    while i < len(args) and args[i] in ("--now", "--force"):
-        o[args[i][2:]] = True
+    while i < len(args) and args[i] in ("--now", "--force", "--prompt-stdin", "--prompt-file"):
+        if args[i] == "--prompt-file":
+            o["prompt_file"] = _value(args, i, args[i], "--prompt-file needs a path") or _no_path()
+            i += 1
+        else:
+            o[args[i][2:].replace("-", "_")] = True
         i += 1
     if i < len(args) and args[i].startswith("-") and args[i] != "-":
         raise UsageError("unknown option %s; %s" % (args[i], usage))
-    if i + 1 >= len(args):
+    if i >= len(args):
         raise UsageError(usage)
     o["name"] = args[i]
-    o["text"] = " ".join(args[i + 1:]).replace("\n", " ")
-    if not o["text"].strip():
-        raise UsageError("nothing to send: the text is empty")
-    return o
+    return _prompt(o, args[i + 1:], usage)
 
 
 def parse_broadcast(args):
-    usage = "usage: fleet broadcast [--to w1,w2] [--now] [--force] [--wait SECS] <text>"
-    o = {"now": False, "force": False, "to": [], "wait": None, "text": ""}
+    usage = ("usage: fleet broadcast [--to w1,w2] [--now] [--force] [--wait SECS] "
+             "[--prompt-file P | --prompt-stdin] [<text>]")
+    o = {"now": False, "force": False, "prompt_file": "", "prompt_stdin": False, "to": [], "wait": None,
+         "text": ""}
     i = 0
     while i < len(args):
         a = args[i]
-        if a in ("--now", "--force"):
-            o[a[2:]] = True
+        if a in ("--now", "--force", "--prompt-stdin"):
+            o[a[2:].replace("-", "_")] = True
+        elif a == "--prompt-file":
+            o["prompt_file"] = _value(args, i, a, "--prompt-file needs a path") or _no_path()
+            i += 1
         elif a == "--to":
             v = _value(args, i, a, "--to needs a comma-separated list of workers")
             o["to"] = [w for w in v.split(",") if w]
@@ -137,12 +148,35 @@ def parse_broadcast(args):
         else:
             break
         i += 1
-    if i >= len(args):
+    return _prompt(o, args[i:], usage)
+
+
+def _no_path():
+    raise UsageError("--prompt-file needs a path")
+
+
+ONE_PROMPT = "give the prompt one way only: as text, with --prompt-file P, or with --prompt-stdin"
+
+
+def _prompt(o, words, usage):
+    """Fill o["text"] from words, unless --prompt-file or --prompt-stdin supplies the prompt.
+    Exactly one of the three may be used."""
+    sources = [bool(words), bool(o["prompt_file"]), o["prompt_stdin"]]
+    if sum(sources) > 1:
+        raise UsageError(ONE_PROMPT)
+    if o["prompt_file"] or o["prompt_stdin"]:
+        return o
+    if not words:
         raise UsageError(usage)
-    o["text"] = " ".join(args[i:]).replace("\n", " ")
-    if not o["text"].strip():
-        raise UsageError("nothing to send: the text is empty")
+    o["text"] = _text(words)
     return o
+
+
+def _text(words):
+    text = " ".join(words).replace("\n", " ")
+    if not text.strip():
+        raise UsageError("nothing to send: the text is empty")
+    return text
 
 
 def _name_and_count(args, usage, default, what):

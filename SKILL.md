@@ -33,20 +33,20 @@ State comes from Claude Code hooks; `status` and `wait` correct it from the scre
 
 - **Choose the branch name** yourself: the Jira key when the work has one (`PROJ-123`), otherwise a short kebab-case slug (`fix-date-parsing`). Flat names only, since the name is also the directory.
 - `--no-worktree` runs in a directory as given (non-git directories, or the user wants no isolation). `--base REF`, `--mode M` (default `auto`), and extra claude args after `--` are on request.
-- `--prompt-file <path>` hands the worker its first task once it is ready; write the task to a file first.
+- `--prompt-file <path>` hands the worker its first task once it is ready. `--prompt-stdin` does the same with the task piped in (a heredoc), so no file to write first.
 - **Exit 3 is the folder-trust dialog.** Trusting is the user's call: ask, and on yes run `fleet keys <branch> Down Enter`. Trust is inherited by subdirectories, so trusting the repo root once covers every future worktree.
 
 Done when `fleet status` shows the worker `idle` (or `busy` on its first task).
 
 ## Relaying a turn
 
-1. `fleet send <worker> "<prompt>"`. Newlines become spaces; for long or multi-line prompts, write a file and send "Read <path> and do what it says."
+1. `fleet send <worker> "<prompt>"`. Newlines become spaces, and every character is typed, so for long or multi-line prompts pipe them in instead: `fleet send --prompt-stdin <worker> <<'EOF' ... EOF`. fleet saves stdin to a file under its state dir and sends "Read <file> and do what it says." For a prompt already in a file, `--prompt-file <path>` sends the same instruction for that file. Use only one of text, `--prompt-file` and `--prompt-stdin`.
 2. `fleet wait <worker> [timeout]`: exit 0 when `done`/`idle`, 4 when `blocked`, 2 on timeout (check `fleet status` and decide whether to keep waiting).
 3. `fleet last <worker> [n]` prints the worker's last reply from its transcript; relay it faithfully, quoting what matters.
 
 A turn is done when `fleet last` holds the reply to your prompt. On exit 4, run `fleet read <worker>` and relay the dialog to the user.
 
-To send **one prompt to several workers**, use `fleet broadcast [--to w1,w2] [--wait SECS] "<prompt>"` instead of a loop: no `--to` means every tracked worker; a refusal (typed text, open dialog, unknown name) skips that worker only; `--wait` waits for all and prints each reply (exit 1 if any send failed, 4 if any blocked, 2 if any timed out). Same authority as `send`.
+To send **one prompt to several workers**, use `fleet broadcast [--to w1,w2] [--wait SECS] "<prompt>"` (or `--prompt-file <path>`, or `--prompt-stdin` with the prompt piped in; all workers read the same file) instead of a loop: no `--to` means every tracked worker; a refusal (typed text, open dialog, unknown name) skips that worker only; `--wait` waits for all and prints each reply (exit 1 if any send failed, 4 if any blocked, 2 if any timed out). Same authority as `send`.
 
 To **steer mid-turn**, `fleet send --now` sends Ctrl+Enter: the worker drops the current turn and runs the new prompt. Plain `send` while busy queues the prompt. `fleet keys <worker> Escape` interrupts without a new prompt.
 

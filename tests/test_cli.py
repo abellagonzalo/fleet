@@ -1,6 +1,7 @@
 """Commands against fake tmux/git/wt: argument parsing, target resolution, send, wait, broadcast,
 status, keys, rm, new, up."""
 
+import io
 import json
 import os
 import shutil
@@ -28,9 +29,12 @@ class Args(unittest.TestCase):
         o = A.parse_new(["repo", "feat", "--base", "origin/dev", "--mode", "auto", "--prompt-file", "p.md",
                          "--no-worktree", "--", "--model", "haiku", "--base"])
         self.assertEqual(o, {"src": "repo", "name": "feat", "worktree": False, "base": "origin/dev",
-                             "mode": "auto", "prompt_file": "p.md", "extra": ["--model", "haiku", "--base"]})
+                             "mode": "auto", "prompt_file": "p.md", "prompt_stdin": False,
+                             "extra": ["--model", "haiku", "--base"]})
         self.assertEqual(A.parse_new(["--mode", "plan", "r", "b"])["mode"], "plan")
-        for bad in (["repo"], [], ["r", "b", "c"], ["r", "b", "--base"], ["r", "b", "--zap"], ["r", "b", "--mode", ""]):
+        self.assertTrue(A.parse_new(["r", "b", "--prompt-stdin"])["prompt_stdin"])
+        for bad in (["repo"], [], ["r", "b", "c"], ["r", "b", "--base"], ["r", "b", "--zap"], ["r", "b", "--mode", ""],
+                    ["r", "b", "--prompt-stdin", "--prompt-file", "p.md"]):
             with self.assertRaises(A.UsageError, msg=bad):
                 A.parse_new(bad)
 
@@ -42,23 +46,39 @@ class Args(unittest.TestCase):
 
     def test_send(self):
         self.assertEqual(A.parse_send(["w", "hello", "world"]),
-                         {"now": False, "force": False, "name": "w", "text": "hello world"})
+                         {"now": False, "force": False, "prompt_file": "", "prompt_stdin": False, "name": "w",
+                          "text": "hello world"})
         self.assertEqual(A.parse_send(["--now", "--force", "w", "a\nb"]),
-                         {"now": True, "force": True, "name": "w", "text": "a b"})
+                         {"now": True, "force": True, "prompt_file": "", "prompt_stdin": False, "name": "w",
+                          "text": "a b"})
+        self.assertEqual(A.parse_send(["--prompt-stdin", "--now", "w"]),
+                         {"now": True, "force": False, "prompt_file": "", "prompt_stdin": True, "name": "w",
+                          "text": ""})
+        self.assertEqual(A.parse_send(["--prompt-file", "p.md", "w"])["prompt_file"], "p.md")
         # after the worker name, everything is text, flags included
         self.assertEqual(A.parse_send(["w", "--now", "please"])["text"], "--now please")
         self.assertFalse(A.parse_send(["w", "--now", "please"])["now"])
-        for bad in ([], ["w"], ["--now", "w"], ["--zap", "w", "x"], ["w", "   "]):
+        for bad in ([], ["w"], ["--now", "w"], ["--zap", "w", "x"], ["w", "   "], ["--prompt-stdin"],
+                    ["--prompt-file"], ["--prompt-file", "", "w"], ["--prompt-file", "p.md"]):
             with self.assertRaises(A.UsageError, msg=bad):
+                A.parse_send(bad)
+        for bad in (["--prompt-stdin", "w", "text"], ["--prompt-file", "p.md", "w", "text"],
+                    ["--prompt-file", "p.md", "--prompt-stdin", "w"]):
+            with self.assertRaisesRegex(A.UsageError, "one way only", msg=bad):
                 A.parse_send(bad)
 
     def test_broadcast(self):
         o = A.parse_broadcast(["--to", "a,b,", "--wait", "30", "--now", "do", "it"])
-        self.assertEqual(o, {"now": True, "force": False, "to": ["a", "b"], "wait": 30, "text": "do it"})
+        self.assertEqual(o, {"now": True, "force": False, "prompt_file": "", "prompt_stdin": False,
+                             "to": ["a", "b"], "wait": 30, "text": "do it"})
+        self.assertEqual(A.parse_broadcast(["--prompt-file", "p.md"])["prompt_file"], "p.md")
+        o = A.parse_broadcast(["--prompt-stdin", "--to", "a"])
+        self.assertEqual((o["prompt_stdin"], o["to"], o["text"]), (True, ["a"], ""))
         self.assertEqual(A.parse_broadcast(["--", "--to", "x"])["text"], "--to x")
         self.assertIsNone(A.parse_broadcast(["x"])["wait"])
         for bad in ([], ["--to"], ["--to", ","], ["--wait"], ["--wait", "soon", "x"], ["--wait", "-1", "x"],
-                    ["--zap", "x"], ["--now"]):
+                    ["--zap", "x"], ["--now"], ["--prompt-stdin", "x"], ["--prompt-file", "p.md", "x"],
+                    ["--prompt-file", "p.md", "--prompt-stdin"], ["--prompt-file"]):
             with self.assertRaises(A.UsageError, msg=bad):
                 A.parse_broadcast(bad)
 
@@ -91,7 +111,7 @@ class Args(unittest.TestCase):
     def test_usage_error_exit_code_and_message(self):
         ctx = make_ctx()
         self.assertEqual(cli.run(ctx, ["send", "w"]), 1)
-        self.assertEqual(ctx.err.getvalue(), "fleet: usage: fleet send [--now] [--force] <worker> <text>\n")
+        self.assertEqual(ctx.err.getvalue(), "fleet: usage: fleet send [--now] [--force] [--prompt-file P | --prompt-stdin] <worker> [<text>]\n")
 
 
 class Fleet(unittest.TestCase):
@@ -330,6 +350,67 @@ class Send(Fleet):
         self.assertEqual(code, 0)
         self.assertFalse(os.path.exists(self.ctx.store.path("%5")))
         self.assertEqual(c.submitted, [("hi", "enter")])
+
+
+class PromptStdin(Fleet):
+    PROMPT = "# Task\n\nRebase on main.\nThen run the tests.\n"
+
+    def saved_prompt(self, sent):
+        prefix, suffix = "Read ", " and do what it says."
+        self.assertTrue(sent.startswith(prefix) and sent.endswith(suffix), sent)
+        path = sent[len(prefix):-len(suffix)]
+        self.assertEqual(os.path.dirname(path), os.path.join(self.dir, "prompts"))
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), self.PROMPT)  # newlines kept
+        return path
+
+    def test_send(self):
+        self.ctx.stdin = io.StringIO(self.PROMPT)
+        code, _, err = self.run_cmd("send", "--prompt-stdin", "alpha")
+        self.assertEqual((code, err), (0, ""))
+        [(sent, how)] = self.a.submitted
+        self.assertEqual(how, "enter")
+        self.saved_prompt(sent)
+
+    def test_broadcast_shares_one_file(self):
+        self.ctx.stdin = io.StringIO(self.PROMPT)
+        code, out, err = self.run_cmd("broadcast", "--prompt-stdin")
+        self.assertEqual((code, err, out), (0, "", "sent to alpha\nsent to beta\n"))
+        self.assertEqual(self.a.submitted, self.b.submitted)
+        self.saved_prompt(self.a.submitted[0][0])
+        self.assertEqual(len(os.listdir(os.path.join(self.dir, "prompts"))), 1)
+
+    def test_prompt_file(self):
+        pf = os.path.join(self.dir, "task.md")
+        open(pf, "w").close()
+        rel = os.path.relpath(pf)
+        code, _, err = self.run_cmd("send", "--prompt-file", rel, "alpha")
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(self.a.submitted, [("Read %s and do what it says." % pf, "enter")])  # made absolute
+        code, out, err = self.run_cmd("broadcast", "--prompt-file", pf)
+        self.assertEqual((code, err, out), (0, "", "sent to alpha\nsent to beta\n"))
+        self.assertEqual(self.b.submitted, [("Read %s and do what it says." % pf, "enter")])
+
+    def test_missing_prompt_file(self):
+        for argv in (["send", "--prompt-file", "/nope.md", "alpha"], ["broadcast", "--prompt-file", "/nope.md"]):
+            code, _, err = self.run_cmd(*argv)
+            self.assertEqual((code, err), (1, "fleet: no such prompt file: /nope.md\n"), argv)
+        self.assertEqual(self.tmux.keys_sent_to("%1"), [])
+
+    def test_empty_stdin(self):
+        for argv in (["send", "--prompt-stdin", "alpha"], ["broadcast", "--prompt-stdin"]):
+            self.ctx.stdin = io.StringIO("  \n")
+            code, _, err = self.run_cmd(*argv)
+            self.assertEqual((code, err), (1, "fleet: --prompt-stdin: stdin is empty; nothing to send\n"), argv)
+        self.assertEqual(self.tmux.keys_sent_to("%1"), [])
+
+    def test_terminal_stdin(self):
+        tty = io.StringIO("")
+        tty.isatty = lambda: True
+        self.ctx.stdin = tty
+        code, _, err = self.run_cmd("send", "--prompt-stdin", "alpha")
+        self.assertEqual(code, 1)
+        self.assertIn("stdin is a terminal", err)
 
 
 class Wait(Fleet):
@@ -651,6 +732,18 @@ class New(Fleet):
         self.assertEqual(sorted(settings["hooks"]), sorted(st.HOOK_EVENTS))
         self.assertEqual(settings["hooks"]["Stop"][0]["hooks"][0]["command"],
                          "FLEET_STATE_DIR=%s /opt/fleet/scripts/fleet-hook Stop" % self.dir)
+
+    def test_prompt_stdin(self):
+        self.ctx.wt.list_out = json.dumps({"items": [{"branch": "feat", "worktree": {"path": self.new_wt}}]})
+        self.ctx.stdin = io.StringIO("line 1\nline 2\n")
+        code, out, err = self.run_cmd("new", self.repo, "feat", "--prompt-stdin")
+        self.assertEqual((code, err), (0, ""), out)
+        pane = [p for p in self.tmux.panes_.values() if p.window == "feat"][0]
+        sent = pane.submitted[1][0]
+        path = sent[len("Read "):-len(" and do what it says.")]
+        self.assertEqual(sent, "Read %s and do what it says." % path)
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "line 1\nline 2\n")
 
     def test_reuses_existing_worktree(self):
         self.ctx.wt.list_out = json.dumps({"items": [{"branch": "feat", "worktree": {"path": self.new_wt}}]})

@@ -10,6 +10,7 @@ import os
 import re
 import shlex
 import sys
+import tempfile
 import time
 
 from . import args as A
@@ -33,12 +34,17 @@ fleet new <repo|repo/main> <branch> [opts]     worker window <branch> in worktre
     --base REF           branch from REF instead of origin's default branch
     --mode M             permission mode (default auto)
     --prompt-file P      once ready, send "Read P and do what it says."
+    --prompt-stdin       the same, with stdin saved to a file under the state dir
     -- args              extra claude args
 fleet status [--json]                          every worker: state (busy|blocked|done|idle|exited), age, detail, last reply
 fleet send [--now] [--force] <worker> <text>   type text like a human, verify it landed, press Enter
                                                --now: Ctrl+Enter (interrupts a running turn, runs immediately)
                                                --force: send even though the prompt box holds typed text
-fleet broadcast [--to w1,w2] [--now] [--force] [--wait SECS] <text>
+                                               --prompt-file P (instead of <text>): send "Read P and do what it says."
+                                               --prompt-stdin (instead of <text>): the same, with stdin saved to a file
+                                               under the state dir. Both keep newlines; use them for long prompts.
+                                               Use only one of <text>, --prompt-file and --prompt-stdin.
+fleet broadcast [--to w1,w2] [--now] [--force] [--wait SECS] <text | --prompt-file P | --prompt-stdin>
                                                send to every tracked worker (or only --to); a refusal skips that
                                                worker, not the rest. --wait: wait for all, print each reply.
                                                Exit 1 if any send failed, else 4 if any blocked, 2 if any timed out
@@ -59,12 +65,13 @@ STATUS_GLYPH = ("#{?#{==:#{@fleet_state},blocked},#[fg=red]⚠#[default],"
 class Ctx:
     def __init__(self, tmux=None, git=None, wt=None, environ=None, out=None, err=None,
                  now=None, sleep=None, monotonic=None, fleet_path="", hook_path="", isatty=None,
-                 cwd=None):
+                 cwd=None, stdin=None):
         self.tmux = tmux or Tmux()
         self.git = git or Git()
         self.wt = wt or Wt()
         self.environ = os.environ if environ is None else environ
         self.out = out or sys.stdout
+        self.stdin = stdin or sys.stdin
         self.err = err or sys.stderr
         self.now = now or (lambda: int(time.time()))
         self.sleep = sleep or time.sleep
@@ -387,11 +394,11 @@ def cmd_new(ctx, argv):
     if re.match(r"^%\d+$", name) or name.startswith("-"):
         raise FleetError("'%s' cannot be a worker name" % name)
     if pfile:
-        if not os.path.isfile(pfile):
-            raise FleetError("no such prompt file: %s" % pfile)
-        pfile = os.path.abspath(pfile)
+        pfile = prompt_path(pfile)
     if not os.path.isdir(src):
         raise FleetError("no such directory: %s" % src)
+    if o["prompt_stdin"]:
+        pfile = stdin_prompt(ctx)  # read now: stdin is not there to read after a minute of wt hooks
     src = os.path.realpath(src)
 
     s = session(ctx)
@@ -429,13 +436,13 @@ def cmd_new(ctx, argv):
         await_prompt(ctx, pane, name, d)
     except (FleetError, FleetExit):
         if pfile:
-            ctx.warn('prompt not sent; once the worker is ready run: fleet send %s "Read %s and do what it says."'
-                     % (name, pfile))
+            ctx.warn('prompt not sent; once the worker is ready run: fleet send %s "%s"'
+                     % (name, read_prompt_file(pfile)))
         raise
     ctx.say("ready: worker '%s' in %s (mode %s). Attach: tmux attach -t %s, then select window '%s'"
             % (name, d, o["mode"], s, name))
     if pfile:
-        return send(ctx, name, "Read %s and do what it says." % pfile)
+        return send(ctx, name, read_prompt_file(pfile))
     return 0
 
 
@@ -477,9 +484,49 @@ def send(ctx, name, text, now=False, force=False):
     return 0
 
 
+def read_prompt_file(path):
+    return "Read %s and do what it says." % path
+
+
+def stdin_prompt(ctx):
+    """Save stdin to a new file under the state dir and return its path. Workers are told to read
+    the file instead of having the text typed in: typing is slow for long prompts and flattens
+    newlines. The file is kept, since a worker reads it after fleet has exited."""
+    if ctx.stdin.isatty():
+        raise FleetError("--prompt-stdin: stdin is a terminal; pipe the prompt in "
+                         "(e.g. fleet ... --prompt-stdin < prompt.md)")
+    text = ctx.stdin.read()
+    if not text.strip():
+        raise FleetError("--prompt-stdin: stdin is empty; nothing to send")
+    d = os.path.join(ctx.store.root, "prompts")
+    os.makedirs(d, exist_ok=True)
+    fd, path = tempfile.mkstemp(prefix="prompt-%d-" % ctx.now(), suffix=".md", dir=d)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.chmod(path, 0o644)
+    return path
+
+
+def prompt_path(path):
+    """The absolute path of an existing prompt file: workers run in other directories."""
+    if not os.path.isfile(path):
+        raise FleetError("no such prompt file: %s" % path)
+    return os.path.abspath(path)
+
+
+def prompt_text(ctx, o):
+    """What to type for a parsed send/broadcast: the text itself, or an instruction to read the
+    --prompt-file or the file --prompt-stdin was saved to."""
+    if o["prompt_file"]:
+        return read_prompt_file(prompt_path(o["prompt_file"]))
+    if o["prompt_stdin"]:
+        return read_prompt_file(stdin_prompt(ctx))
+    return o["text"]
+
+
 def cmd_send(ctx, argv):
     o = A.parse_send(argv)
-    return send(ctx, o["name"], o["text"], now=o["now"], force=o["force"])
+    return send(ctx, o["name"], prompt_text(ctx, o), now=o["now"], force=o["force"])
 
 
 def wait(ctx, name, timeout):
@@ -513,10 +560,11 @@ def cmd_broadcast(ctx, argv):
     workers = o["to"] or worker_names(ctx)
     if not workers:
         raise FleetError("no workers to send to")
+    text = prompt_text(ctx, o)  # resolved once: with --prompt-stdin every recipient reads one file
     sent, rc = [], 0
     for w in workers:
         try:
-            send(ctx.quiet(), w, o["text"], now=o["now"], force=o["force"])
+            send(ctx.quiet(), w, text, now=o["now"], force=o["force"])
         except FleetError as e:
             ctx.warn("fleet: %s" % e)
             ctx.say("NOT sent to %s (reason above)" % w)
