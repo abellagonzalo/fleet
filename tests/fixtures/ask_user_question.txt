@@ -1,0 +1,40 @@
+
+❯ Create hello.py that prints hello, then run it with python3 via Bash.
+
+⏺ Write(hello.py)
+  ⎿  Wrote 1 line to hello.py
+      1 print("hello")
+
+  Ran 1 shell command
+
+⏺ I created hello.py in /private/tmp/fleet-pyrw/trustdir/ with a single line, print("hello").
+  Running it with python3 printed hello.
+
+✻ Churned for 5s · done 12:45
+
+❯ Change hello.py to print goodbye instead. Don't run it.
+
+⏺ Update(hello.py)
+  ⎿  Added 1 line, removed 1 line
+      1 -print("hello")
+      1 +print("goodbye")
+
+⏺ hello.py now prints goodbye instead of hello. I did not run it.
+
+✻ Churned for 2s · done 12:45
+
+❯ Use the AskUserQuestion tool to ask me whether I prefer red or blue.
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Color
+
+Do you prefer red or blue?
+
+❯ 1. Red
+     Choose red.
+  2. Blue
+     Choose blue.
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel

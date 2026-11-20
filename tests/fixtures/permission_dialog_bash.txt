@@ -1,0 +1,40 @@
+  She cranked for four hours. Her forearms burned. Once she thought she heard an answering horn,
+  faint and to the east, and she cranked harder.
+
+  At dawn the fog lifted in slow white curtains. A trawler sat a mile off the rocks, its deck crew
+  raising a hand toward the tower. Edith raised hers back.
+
+  Later, a letter arrived from the company: a formal commendation, and a pension she had not
+  expected. She read it, folded it, and put it with the others.
+
+  Then she walked down the one hundred and twelve steps for the last time, her hand trailing the
+  cold rail. She did not look back at the light, because she knew it would keep burning without her,
+  and that, she decided, was what a good keeper hoped for.
+
+✻ Brewed for 20s · done 12:44
+
+❯ Create hello.py that prints hello, then run it with python3 via Bash.
+
+⏺ Write(hello.py)
+  ⎿  Wrote 1 line to hello.py
+      1 print("hello")
+
+⏺ Running hello.py with python3
+  ⎿  $ python3 /private/tmp/fleet-pyrw/trustdir/hello.py
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Bash command
+ Tip: auto mode handles these prompts for you — choose "switch to auto mode" below
+ Run hello.py with python3
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ python3 /private/tmp/fleet-pyrw/trustdir/hello.py
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ This command requires approval
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and don’t ask again for: python3 *
+   3. Yes, and switch to auto mode · auto mode handles these prompts for you
+   4. No
+
+ Esc to cancel · Tab to amend

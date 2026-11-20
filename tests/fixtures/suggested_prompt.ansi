@@ -1,0 +1,40 @@
+  raising a hand toward the tower. Edith raised hers back.
+
+  Later, a letter arrived from the company: a formal commendation, and a pension she had not
+  expected. She read it, folded it, and put it with the others.
+
+  Then she walked down the one hundred and twelve steps for the last time, her hand trailing the
+  cold rail. She did not look back at the light, because she knew it would keep burning without her,
+  and that, she decided, was what a good keeper hoped for.
+
+[38;5;246m✻[39m [38;5;246mBrewed for 20s · done 12:44[39m
+
+[38;5;246m[48;5;237m❯ [38;5;231mCreate hello.py that prints hello, then run it with python3 via Bash.[39m
+
+[38;5;114m[49m⏺[39m [1mWrite[0m(]8;id=hcfak2;file:///private/tmp/fleet-pyrw/trustdir/hello.py\hello.py]8;;\)
+[38;5;246m  ⎿  [39mWrote [1m1[0m line to [1m]8;id=hcfak2;file:///private/tmp/fleet-pyrw/trustdir/hello.py\hello.py[0m]8;;\
+     [2m 1 [0m[38;5;148mprint[39m([38;5;186m"hello"[39m)
+
+  [38;5;246mRan [1m1[0m[38;5;246m shell command [39m
+
+[38;5;231m⏺[39m I created [38;5;153mhello.py[39m in [38;5;153m/private/tmp/fleet-pyrw/trustdir/[39m with a single line, [38;5;153mprint("hello")[39m.
+  Running it with [38;5;153mpython3[39m printed [38;5;153mhello[39m.
+
+[38;5;246m✻[39m [38;5;246mChurned for 5s · done 12:45[39m
+
+[38;5;246m[48;5;237m❯ [38;5;231mChange hello.py to print goodbye instead. Don't run it.[39m
+
+[38;5;114m[49m⏺[39m [1mUpdate[0m(]8;id=hcfak2;file:///private/tmp/fleet-pyrw/trustdir/hello.py\hello.py]8;;\)
+[38;5;246m  ⎿  [39mAdded [1m1[0m line, removed [1m1[0m line
+     [38;5;167m[48;5;52m 1 -[38;5;231mprint("hello")                                                                      [39m[49m
+     [38;5;77m[48;5;22m 1 +[38;5;148mprint[38;5;231m([38;5;186m"[48;5;28mgoodbye[48;5;22m"[38;5;231m)                                                                    [39m[49m
+
+[38;5;231m⏺[39m [38;5;153mhello.py[39m now prints [38;5;153mgoodbye[39m instead of [38;5;153mhello[39m. I did not run it.
+
+[38;5;246m✻[39m [38;5;246mChurned for 2s · done 12:45[39m
+
+[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m❯ [2mrun it with python3[0m
+[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  [2m[36mctx 5%/1.0M[0m[38;5;246m [2m|[0m[38;5;246m [2m[33mtok 46.1kin/31out[0m[38;5;246m [2m|[0m[38;5;246m [2m[35m5h 50%[0m[38;5;246m [2m|[0m[38;5;246m [2m[32m7d 70%[0m
+  [38;5;246m⏸ manual mode on[39m

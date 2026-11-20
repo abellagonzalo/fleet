@@ -204,8 +204,8 @@ def _box_text(rows):
             start += 1
         t_chars = "".join(c for c, d in zip(text[start:], dim[start:]) if not d)
         g_chars = "".join(c for c, d in zip(text[start:], dim[start:]) if d)
-        typed.append(t_chars.replace(NBSP, " ").rstrip())
-        ghost.append(g_chars.replace(NBSP, " ").rstrip())
+        typed.append(t_chars.replace(NBSP, " ").strip())
+        ghost.append(g_chars.replace(NBSP, " ").strip())
     typed_s = " ".join(t for t in typed if t)
     ghost_s = " ".join(g for g in ghost if g)
     return typed_s, ghost_s

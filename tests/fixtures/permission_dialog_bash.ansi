@@ -1,0 +1,40 @@
+  She cranked for four hours. Her forearms burned. Once she thought she heard an answering horn,
+  faint and to the east, and she cranked harder.
+
+  At dawn the fog lifted in slow white curtains. A trawler sat a mile off the rocks, its deck crew
+  raising a hand toward the tower. Edith raised hers back.
+
+  Later, a letter arrived from the company: a formal commendation, and a pension she had not
+  expected. She read it, folded it, and put it with the others.
+
+  Then she walked down the one hundred and twelve steps for the last time, her hand trailing the
+  cold rail. She did not look back at the light, because she knew it would keep burning without her,
+  and that, she decided, was what a good keeper hoped for.
+
+[38;5;246m✻[39m [38;5;246mBrewed for 20s · done 12:44[39m
+
+[38;5;246m[48;5;237m❯ [38;5;231mCreate hello.py that prints hello, then run it with python3 via Bash.[39m
+[49m
+[38;5;114m⏺[39m [1mWrite[0m(]8;id=hcfak2;file:///private/tmp/fleet-pyrw/trustdir/hello.py\hello.py]8;;\)
+[38;5;246m  ⎿  [39mWrote [1m1[0m line to [1m]8;id=hcfak2;file:///private/tmp/fleet-pyrw/trustdir/hello.py\hello.py[0m]8;;\
+     [2m 1 [0m[38;5;148mprint[39m([38;5;186m"hello"[39m)
+
+[38;5;246m⏺[39m Running hello.py with python3
+[38;5;246m  ⎿  $ python3 /private/tmp/fleet-pyrw/trustdir/hello.py[39m
+
+[38;5;153m────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m [1m[38;5;153mBash command[0m
+ [1mTip: auto mode handles these prompts for you — choose "switch to auto mode" below[0m
+ [38;5;246mRun hello.py with python3[39m
+[38;5;239m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+[39m python3 /private/tmp/fleet-pyrw/trustdir/hello.py
+[38;5;239m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+[39m This command requires approval
+
+ Do you want to proceed?
+ [38;5;153m❯[39m [38;5;246m1. [38;5;153mYes[39m
+   [38;5;246m2. [39mYes, and don’t ask again for: python3 *
+   [38;5;246m3. [39mYes, and switch to auto mode[38;5;246m · auto mode handles these prompts for you[39m
+   [38;5;246m4. [39mNo
+
+ [38;5;246mEsc to cancel · Tab to amend[39m

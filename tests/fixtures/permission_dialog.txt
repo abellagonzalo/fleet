@@ -1,0 +1,40 @@
+
+  She stood at the rail and listened. Somewhere out in the murk, an engine throbbed, slow and
+  uncertain. A fishing boat, maybe, its radar dead, its crew squinting at nothing.
+
+  Edith went inside. She did not switch off the automatic system. Instead she hauled the old
+  hand-crank foghorn from its storage locker, the one nobody had sounded since 1987, and she cranked
+  it. The sound rolled out low and enormous, a bellow across the water.
+
+  She cranked for four hours. Her forearms burned. Once she thought she heard an answering horn,
+  faint and to the east, and she cranked harder.
+
+  At dawn the fog lifted in slow white curtains. A trawler sat a mile off the rocks, its deck crew
+  raising a hand toward the tower. Edith raised hers back.
+
+  Later, a letter arrived from the company: a formal commendation, and a pension she had not
+  expected. She read it, folded it, and put it with the others.
+
+  Then she walked down the one hundred and twelve steps for the last time, her hand trailing the
+  cold rail. She did not look back at the light, because she knew it would keep burning without her,
+  and that, she decided, was what a good keeper hoped for.
+
+✻ Brewed for 20s · done 12:44
+
+❯ Create hello.py that prints hello, then run it with python3 via Bash.
+
+⏺ Write(hello.py)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Create file
+ hello.py
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+  1 print("hello")
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Do you want to create hello.py?
+ ❯ 1. Yes
+   2. Yes, and switch to accept edits (auto-approve file edits and common file commands) for this
+      session (shift+tab)
+   3. No
+
+ Esc to cancel · Tab to amend

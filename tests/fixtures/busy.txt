@@ -1,0 +1,40 @@
+
+ ▐▛███▛█   Claude Code v2.1.329
+▝▜██████▀  Haiku 5.5 · Claude Team
+ ▝▝   ▝▝   /private/tmp/fleet-pyrw/trustdir
+
+
+❯ Write a 400 word story about a lighthouse keeper. No tools.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+✶ Elucidating… (2s · ↓ 186 tokens · thinking)
+                                                                      ctrl+y to paste deleted text
+────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  tok 0in/0out | 5h 50% | 7d 70%
+  ⏸ manual mode on · esc to interrupt
