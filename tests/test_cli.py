@@ -724,7 +724,7 @@ class New(Fleet):
         self.assertEqual(self.tmux.pane_options[(pane.id, "@fleet_name")], "feat")
         launched, submitted = pane.submitted[0][0], pane.submitted[1][0]
         hooks = os.path.join(self.dir, "hooks.json")
-        self.assertEqual(launched, "FLEET_STATE_DIR=%s claude --name feat --permission-mode auto --settings %s --model haiku"
+        self.assertEqual(launched, "FLEET_STATE_DIR=%s claude /fleet-worker --name feat --permission-mode auto --settings %s --model haiku"
                          % (self.dir, hooks))
         self.assertEqual(submitted, "Read %s and do what it says." % pf)
         self.assertIn("worktree %s on new branch feat from origin/main" % self.new_wt, out)
@@ -812,7 +812,7 @@ class Up(unittest.TestCase):
         self.assertEqual((pane.session, pane.window), ("fleet-x", "orch"))
         self.assertEqual(tmux.pane_options[(pane.id, "@fleet_role")], "orch")
         self.assertEqual(pane.submitted[0][0],
-                         "claude /fleet --name fleet-x --permission-mode auto --allowedTools 'Bash(/opt/fleet/scripts/fleet *)' --model opus")
+                         "claude /fleet-orchestrator --name fleet-x --permission-mode auto --allowedTools 'Bash(/opt/fleet/scripts/fleet *)' --model opus")
         self.assertEqual(cli.run(ctx, ["up", "x"]), 1)
         self.assertIn("session 'fleet-x' already exists", ctx.err.getvalue())
 

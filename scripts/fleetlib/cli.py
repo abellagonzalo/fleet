@@ -250,7 +250,7 @@ def cmd_up(ctx, argv):
         raise FleetError("tmux did not report the new session's pane")
     style_window(ctx, pane)
     ctx.tmux.set_pane_option(pane, "@fleet_role", "orch")
-    cmd = ["claude", "/fleet", "--name", s, "--permission-mode", o["mode"],
+    cmd = ["claude", "/fleet-orchestrator", "--name", s, "--permission-mode", o["mode"],
            "--allowedTools", "Bash(%s *)" % ctx.fleet_path] + o["extra"]
     ctx.tmux.send_literal(pane, _shell_line(cmd, ctx), orch_ok=True)
     ctx.tmux.send_keys(pane, "Enter", orch_ok=True)
@@ -429,7 +429,7 @@ def cmd_new(ctx, argv):
         "branch": name if repo else "", "mode": o["mode"], "state": "starting", "detail": "",
         "ts": now, "created": now})
 
-    cmd = ["claude", "--name", name, "--permission-mode", o["mode"], "--settings", hooks] + o["extra"]
+    cmd = ["claude", "/fleet-worker", "--name", name, "--permission-mode", o["mode"], "--settings", hooks] + o["extra"]
     ctx.tmux.send_literal(pane, _shell_line(cmd, ctx))
     ctx.tmux.send_keys(pane, "Enter")
     try:

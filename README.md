@@ -1,7 +1,14 @@
 # fleet
 
-The `fleet` skill: run a fleet of interactive Claude Code workers as windows of one tmux session.
-`SKILL.md` is how the orchestrator uses it; `scripts/fleet help` lists every command.
+Two skills and a CLI to run a fleet of interactive Claude Code workers as windows of one tmux session.
+`skills/fleet-orchestrator/SKILL.md` (`/fleet-orchestrator`) is how the orchestrator uses it; `skills/fleet-worker/SKILL.md`
+(`/fleet-worker`) is what every worker loads as its first prompt; `scripts/fleet help` lists every command.
+
+Install:
+
+    ln -s <this checkout>/scripts/fleet ~/.local/bin/fleet
+    ln -s <this checkout>/skills/fleet-orchestrator ~/.claude/skills/fleet-orchestrator
+    ln -s <this checkout>/skills/fleet-worker ~/.claude/skills/fleet-worker
 
 - `scripts/fleet`: the CLI. `scripts/fleet-hook`: the Claude Code hook `fleet new` wires into workers.
 - `scripts/fleetlib/`: the code. `screen.py` reads Claude Code's TUI from tmux captures, `state.py`
