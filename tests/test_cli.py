@@ -435,6 +435,23 @@ class Broadcast(Fleet):
         self.assertIn("fleet: no worker 'ghost'", err)
         self.assertEqual(self.b.submitted, [("go", "enter")])
 
+    def test_a_dialog_refusal_shows_the_dialog(self):
+        self.a.screen = fixture("permission_dialog.ansi")
+        code, out, err = self.run_cmd("broadcast", "go")
+        self.assertEqual(code, 1)
+        self.assertIn("fleet: 'alpha' shows a dialog (above)", err)
+        self.assertIn("Esc to cancel", out.split("NOT sent to alpha")[0])  # the "above" is there
+        self.assertTrue(out.endswith("NOT sent to alpha (reason above)\nsent to beta\n"), out)
+        self.assertEqual(self.b.submitted, [("go", "enter")])
+
+    def test_a_missing_prompt_box_shows_the_screen(self):
+        self.a.screen = "user@host ~ $ \n"
+        code, out, err = self.run_cmd("broadcast", "go")
+        self.assertEqual(code, 1)
+        self.assertIn("no claude prompt box on 'alpha' (screen above)", err)
+        self.assertEqual(out, "user@host ~ $ \nNOT sent to alpha (reason above)\nsent to beta\n")
+        self.assertEqual(self.b.submitted, [("go", "enter")])
+
     def test_orchestrator_is_never_a_recipient(self):
         code, out, _ = self.run_cmd("broadcast", "--to", "orch", "go")
         self.assertEqual(code, 1)
@@ -496,6 +513,44 @@ class Broadcast(Fleet):
         self.assertEqual(out, "sent to alpha\nsent to beta\n"
                               "##### alpha: INTERRUPTED, see it with: fleet read alpha\n"
                               "##### beta: finished\nrebased\n")
+
+    def go_busy_once_sent(self, *panes):
+        def tick(t):
+            for p in panes:
+                if p.submitted:
+                    p.screen = fixture("busy.ansi")
+        self.clock.on_sleep = tick
+
+    def test_wait_shares_one_deadline(self):
+        self.go_busy_once_sent(self.a, self.b)
+        start = self.clock.t
+        code, out, _ = self.run_cmd("broadcast", "--wait", "30", "rebase")
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "sent to alpha\nsent to beta\n"
+                              "##### alpha: still busy after 30s\n##### beta: still busy after 30s\n")
+        self.assertLess(self.clock.t - start, 40)  # one deadline, not 30 s per worker
+
+    def test_wait_reports_a_late_finish_and_a_timeout_within_one_deadline(self):
+        # alpha finishes late, beta never does: beta's timeout runs alongside alpha's turn, not after
+        busy = fixture("busy.ansi")
+        life = self.ctx.lifecycle
+        start = self.clock.t
+
+        def tick(t):
+            if self.b.submitted:
+                self.b.screen = busy
+            if self.a.submitted and self.a.screen is None:
+                self.a.screen = busy
+            if t - start >= 25 and self.rec(self.a)["state"] != "idle":
+                life.hook_event("%1", "UserPromptSubmit", {"prompt": "rebase"})
+                life.hook_event("%1", "Stop", {"last_assistant_message": "rebased"})
+                self.a.screen = fixture("done.ansi")
+        self.clock.on_sleep = tick
+        code, out, _ = self.run_cmd("broadcast", "--wait", "30", "rebase")
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "sent to alpha\nsent to beta\n"
+                              "##### alpha: finished\nrebased\n##### beta: still busy after 30s\n")
+        self.assertLess(self.clock.t - start, 40)
 
 
 class Status(Fleet):

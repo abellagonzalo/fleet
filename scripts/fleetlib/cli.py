@@ -92,7 +92,7 @@ class Ctx:
         self.delay = float(self.environ.get("FLEET_DELAY") or DELAY_DEFAULT)
 
     def quiet(self):
-        """The same context with stdout discarded (broadcast runs send and wait this way)."""
+        """The same context with stdout discarded (broadcast runs send this way; its refusals carry their screen)."""
         c = Ctx.__new__(Ctx)
         c.__dict__.update(self.__dict__)
         c.out = io.StringIO()
@@ -229,9 +229,8 @@ def await_prompt(ctx, pane, name, dirname):
                                "fleet keys %s Down Enter" % (dirname, name))
         if scr.is_ready():
             return
-    if scr is not None:
-        ctx.say(*scr.tail(20))
-    raise FleetError("claude did not show a prompt box within %ds (screen above)" % PROMPT_TIMEOUT)
+    raise FleetError("claude did not show a prompt box within %ds (screen above)" % PROMPT_TIMEOUT,
+                     screen=scr.tail(20) if scr is not None else ())
 
 
 def cmd_new(ctx, argv):
@@ -291,12 +290,11 @@ def send(ctx, w, text, now=False, force=False):
     pane, name = w.pane, w.name
     scr = capture(ctx, pane)
     if scr.has_dialog():
-        ctx.say(*scr.tail(12))
-        raise FleetError("'%s' shows a dialog (above); answer it with: fleet keys %s <key>" % (name, name))
+        raise FleetError("'%s' shows a dialog (above); answer it with: fleet keys %s <key>" % (name, name),
+                         screen=scr.tail(12))
     box = scr.prompt_box()
     if box is None:
-        ctx.say(*scr.tail(12))
-        raise FleetError("no claude prompt box on '%s' (screen above); not typing" % name)
+        raise FleetError("no claude prompt box on '%s' (screen above); not typing" % name, screen=scr.tail(12))
     if box.typed and not force:
         raise FleetError("prompt box already holds: '%s' (someone typed there). "
                          "Re-run with --force to append anyway." % box.typed)
@@ -311,8 +309,8 @@ def send(ctx, w, text, now=False, force=False):
         if S.shows_typed(scr, text):
             break
         if ctx.monotonic() >= deadline:
-            ctx.say(*scr.tail(8))
-            raise FleetError("typed text not visible in the prompt box; not submitting (screen above)")
+            raise FleetError("typed text not visible in the prompt box; not submitting (screen above)",
+                             screen=scr.tail(8))
     if ctx.lifecycle.is_tracked(pane):
         # before the key press, so the prompt's UserPromptSubmit and Stop are ordered after it
         ctx.lifecycle.prompt_sent(pane)
@@ -375,24 +373,62 @@ WAIT_CODES = {"finished": 0, "exited": 0, "idle": 0, "interrupted": 5, "blocked"
 def wait(ctx, w, timeout):
     """0 when the turn after the last send finished (or the worker exited, or, never sent to, is
     idle), 5 when that turn was interrupted, 4 when blocked, 2 on timeout. `w`: a Roster handle."""
-    pane, name = R.require_worker(w).pane, w.name
-    look, recheck = screen_classifier(ctx, pane)
+    [r] = wait_all(ctx, [w], timeout)
+    if isinstance(r, FleetError):
+        raise r
+    code, line = r
+    ctx.say(line)
+    return code
+
+
+def wait_all(ctx, handles, timeout):
+    """Wait on every worker in `handles` (Roster handles) against one deadline, `timeout` seconds
+    from now. Every round polls each worker still pending; a worker drops out once its wait is over
+    (finished, exited, idle, interrupted or blocked). Returns, in the order given, (code, line) as `wait` would return and print it, or
+    the FleetError that worker's wait failed with."""
+    results = [None] * len(handles)
+    pending = {}  # index -> (pane, name, look, recheck)
+    for i, w in enumerate(handles):
+        try:
+            pane = R.require_worker(w).pane
+        except FleetError as e:
+            results[i] = e
+            continue
+        pending[i] = (pane, w.name) + screen_classifier(ctx, pane)
     deadline = ctx.monotonic() + timeout
-    while True:
-        view = ctx.lifecycle.wait_view(pane, look, recheck)
-        if view is None:
-            raise FleetError("'%s' is no longer tracked (its state file is gone)" % name)
-        if view == "blocked":
-            rec = ctx.lifecycle.load(pane) or {}
-            ctx.say("blocked: %s. See it with: fleet read %s" % (rec.get("detail", ""), name))
-            return 4
-        if view in WAIT_CODES:
-            ctx.say(view)
-            return WAIT_CODES[view]
-        if ctx.monotonic() >= deadline:
-            ctx.say("still %s after %ds" % (view, timeout))
-            return 2
-        ctx.sleep(1)
+    while pending:
+        views = {}
+        for i, (pane, name, look, recheck) in list(pending.items()):
+            try:
+                r = _wait_step(ctx, pane, name, look, recheck)
+            except FleetError as e:  # fails this worker's wait, not the others'
+                r = e
+            if isinstance(r, str):
+                views[i] = r
+            else:
+                results[i] = r
+                del pending[i]
+        if pending and ctx.monotonic() >= deadline:
+            for i in pending:
+                results[i] = (2, "still %s after %ds" % (views[i], timeout))
+            break
+        if pending:
+            ctx.sleep(1)
+    return results
+
+
+def _wait_step(ctx, pane, name, look, recheck):
+    """One poll of one worker: its (code, line) once the wait is over, the FleetError if it can't be
+    waited on, else the view it is still in."""
+    view = ctx.lifecycle.wait_view(pane, look, recheck)
+    if view is None:
+        return FleetError("'%s' is no longer tracked (its state file is gone)" % name)
+    if view == "blocked":
+        rec = ctx.lifecycle.load(pane) or {}
+        return 4, "blocked: %s. See it with: fleet read %s" % (rec.get("detail", ""), name)
+    if view in WAIT_CODES:
+        return WAIT_CODES[view], view
+    return view
 
 
 def cmd_wait(ctx, argv):
@@ -417,7 +453,7 @@ def cmd_broadcast(ctx, argv):
             h = ros.lookup(query)
             send(ctx.quiet(), h, text, now=o["now"], force=o["force"])
         except FleetError as e:
-            ctx.warn("fleet: %s" % e)
+            report_error(ctx, e)
             ctx.say("NOT sent to %s (reason above)" % name)
             rc = 1
         else:
@@ -425,17 +461,17 @@ def cmd_broadcast(ctx, argv):
             ctx.say("sent to %s" % name)
     if o["wait"] is None:
         return rc
-    # Workers run concurrently, so waiting on each in turn costs no more than the slowest.
+    # One deadline for all: the wait takes about --wait seconds however many workers stay busy.
+    # Reported in send order, whatever order they finish in.
     blocked = interrupted = timed_out = False
-    for w, h in sent:
-        q = ctx.quiet()
-        try:
-            wr = wait(q, h, o["wait"])
-        except FleetError as e:
-            ctx.warn("fleet: %s" % e)
-            wr = 1
+    for (w, h), r in zip(sent, wait_all(ctx, [h for _, h in sent], o["wait"])):
+        if isinstance(r, FleetError):
+            report_error(ctx, r)
+            wr, line = 1, ""
+        else:
+            wr, line = r
         if wr == 0:
-            ctx.say("##### %s: %s" % (w, q.out.getvalue().strip()))  # finished, exited or idle
+            ctx.say("##### %s: %s" % (w, line))  # finished, exited or idle
             last(ctx, h, 1)
         elif wr == 4:
             ctx.say("##### %s: BLOCKED, see it with: fleet read %s" % (w, w))
@@ -626,8 +662,14 @@ def run(ctx, argv):
             ctx.warn(e.message)
         return e.code
     except FleetError as e:
-        ctx.warn("fleet: %s" % e)
+        report_error(ctx, e)
         return e.code
+
+
+def report_error(ctx, e):
+    """Print a FleetError: the screen it is about to stdout, then `fleet: <message>` to stderr."""
+    ctx.say(*e.screen)
+    ctx.warn("fleet: %s" % e)
 
 
 def main(argv, fleet_path):
