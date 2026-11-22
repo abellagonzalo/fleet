@@ -132,10 +132,14 @@ class Lifecycle:
 
     def reconcile(self, pane, look, recheck):
         """Correct a stale busy/blocked state from the screen (hooks miss interrupts and cancelled
-        dialogs). look/recheck: see reconcile_decision. Returns the record as it stands afterwards."""
+        dialogs). look/recheck: see reconcile_decision. Returns the record as it stands afterwards.
+
+        The screen is read outside the lock (with a pause before the second look), so the
+        correction is dropped if any event was written meanwhile: that event is fresher news."""
         rec = self.load(pane)
         if rec is None:
             return None
+        judged_seq = rec.get("seq")
         now = self.now()
         d = reconcile_decision(rec.get("state"), rec.get("heard_at"), now, look, recheck)
         if d is None:
@@ -143,6 +147,8 @@ class Lifecycle:
         state, detail = d
 
         def change(rec):
+            if rec.get("seq") != judged_seq:
+                return
             seq = _bump(rec)
             if state == "idle":  # the turn is over without a Stop: interrupted
                 _set(rec, "idle", now)
