@@ -65,6 +65,8 @@ The `## Fleet` section is free-form markdown read by agents, not parsed by the C
 
 The worker loads `/fleet-worker` as its first prompt and replies `Ready: ...`. Done when `fleet status` shows that reply (or the worker `busy` on its first task). With `--prompt-stdin`, tell the user the worker is running its first task and give control back; don't wait for the task (see [Relaying a turn](#relaying-a-turn)).
 
+**Workers share one machine's CPU and memory.** A timing flake that a worker reports while other workers were busy is most likely load, not a real failure (`fleet-worker` covers how workers rerun and report it). If flakes keep coming, offer to stagger heavy phases, and do so if the user wants: for example, hold off on `fleet new` (its post-start hooks build) while other workers run their full test suites.
+
 ## Passing a prompt
 
 `send`, `broadcast` and `new` take a prompt in one of three forms. **Stdin is the default**:

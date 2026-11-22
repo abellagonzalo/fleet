@@ -28,6 +28,16 @@ Keep the headline under 80 characters. Below it, write what the user needs to ac
 
 Before a `Done:`, follow the end-of-task policy in the task prompt: what done means, who merges, and the verification gate. If the prompt gives none, follow the `## Fleet` section in the repo's `CLAUDE.md` or `AGENTS.md`. Once your work is merged, say so in the hand-off and that you are ready for `fleet rm`.
 
+## Test failures
+
+You share the machine with other fleet workers, and their builds and tests can slow yours down. Assume other workers are busy; don't check.
+
+- **A timing error gets one rerun of that test** before you report it: a timeout, "not ready", still indexing, a slow startup, a connection refused by a service that is still starting.
+  - **Passes on the rerun:** carry on; the rerun counts toward the verification gate unless the end-of-task policy says otherwise. In the hand-off, mention the probable load flake: the test name, the error, and that it passed on rerun.
+  - **Fails again:** it's a real failure. End with `Failed:` (or `Need input:` if the user has to decide), and include both failure outputs.
+- **Never rerun a failed assertion** or any other non-timing failure, and never rerun a whole suite or more than once.
+- **Don't open issues about flaky tests.** Mentioning the flake in the hand-off is enough; the user decides whether to file one.
+
 ## Asking
 
 - A choice between a few concrete options: ask with `AskUserQuestion`. It marks you `blocked` and notifies the user; the orchestrator relays the options and answers with the user's pick.
