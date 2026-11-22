@@ -532,8 +532,26 @@ class Broadcast(Fleet):
         self.clock.on_sleep = tick
         code, out, _ = self.run_cmd("broadcast", "--wait", "20", "rebase")
         self.assertEqual(code, 4)
-        self.assertEqual(out, "sent to alpha\nsent to beta\n##### alpha: done\nrebased\n----\n"
+        self.assertEqual(out, "sent to alpha\nsent to beta\n##### alpha: finished\nrebased\n----\n"
                               "##### beta: BLOCKED, see it with: fleet read beta\n")
+
+
+    def test_wait_reports_interrupted_and_finished(self):
+        life = self.ctx.lifecycle
+
+        def tick(t):
+            if self.a.submitted and self.rec(self.a).get("submit_seq") is None:
+                life.hook_event("%1", "UserPromptSubmit", {"prompt": "rebase"})
+                self.a.screen = fixture("interrupted.ansi")  # Escape; no Stop fires
+            if self.b.submitted and self.rec(self.b)["state"] != "idle":
+                life.hook_event("%2", "UserPromptSubmit", {"prompt": "rebase"})
+                life.hook_event("%2", "Stop", {"last_assistant_message": "rebased"})
+        self.clock.on_sleep = tick
+        code, out, _ = self.run_cmd("broadcast", "--wait", "20", "rebase")
+        self.assertEqual(code, 5)
+        self.assertEqual(out, "sent to alpha\nsent to beta\n"
+                              "##### alpha: INTERRUPTED, see it with: fleet read alpha\n"
+                              "##### beta: finished\nrebased\n")
 
 
 class Status(Fleet):
