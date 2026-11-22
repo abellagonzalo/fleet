@@ -133,6 +133,19 @@ class Turns(Worker):
         self.assertEqual((r["state"], r["outcome"]), ("idle", "interrupted"))
         self.assertEqual(self.glyphs[-1], "interrupted")
 
+    def test_a_stop_during_the_screen_check_wins(self):
+        # reconcile pauses before its second look; a Stop landing then must not be overwritten
+        self.send()
+        self.event("UserPromptSubmit", prompt="go")
+        self.t += lc.STALE
+
+        def recheck():
+            self.event("Stop", last_assistant_message="made it")
+            return "quiet"
+        self.life.reconcile(self.PANE, lambda: "quiet", recheck)
+        self.assertEqual((self.rec()["state"], self.rec()["outcome"]), ("idle", "finished"))
+        self.assertEqual(self.wait_view(), "finished")
+
     def test_a_new_session_has_no_last_turn(self):
         self.event("UserPromptSubmit", prompt="go")
         self.event("Stop")
