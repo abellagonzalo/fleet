@@ -24,6 +24,8 @@ Every turn ends with a **hand-off**: the reply the orchestrator reads with `flee
 
 Keep the headline under 80 characters. Below it, write what the user needs to act on: what you changed (files, commits), what you verified and how, and what is left. The hand-off is self-contained: it names files and commands outright, so it reads correctly when relayed alone.
 
+Before a `Done:`, follow the end-of-task policy in the task prompt: what done means, who merges, and the verification gate. If the prompt gives none, follow the `## Fleet` section in the repo's `CLAUDE.md` or `AGENTS.md`.
+
 ## Asking
 
 - A choice between a few concrete options: ask with `AskUserQuestion`. It marks you `blocked` and notifies the user; the orchestrator relays the options and answers with the user's pick.

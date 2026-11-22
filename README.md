@@ -86,6 +86,23 @@ for that by reading the screen.
 `Done: ...`, `Need input: ...` or `Failed: ...`. A worker whose finished turn says `Need input:` is
 waiting on you just as much as a `blocked` one.
 
+**End-of-task policy.** Before a worker starts on a task, the orchestrator agrees with you on what
+"done" means, who merges, and what verification a merge needs. It then puts that policy in full
+into the worker's first prompt. Its default proposal is that the worker merges its own PR once the
+conditions hold; it takes effect only when you agree to it in the session. To set a policy for a
+project, add a `## Fleet` section to the repo's `CLAUDE.md` or `AGENTS.md`. For a policy across all
+projects, add it to `~/.claude/CLAUDE.md`. What you say in the session beats the repo's section,
+and the repo's section beats the global one. The section is plain markdown that agents read; the
+CLI doesn't parse it:
+
+```markdown
+## Fleet
+
+- **Done means:** tests pass, PR opened, linked issue closed.
+- **Merging:** the worker merges its own PR when the tests and the verification gate pass; otherwise it replies `Need input:`.
+- **Verification:** no CI here; the gate is `python3 -m unittest discover -s tests` passing locally.
+```
+
 **Sending prompts safely.** Panes are shared with you, so `fleet send` types like a human, checks
 that the text landed, and then presses Enter. It refuses if the prompt box holds text you typed,
 if a dialog is open, or if claude has exited. Long prompts go through `--prompt-stdin` or

@@ -35,13 +35,31 @@ State comes from Claude Code hooks; `status` and `wait` correct it from the scre
 
 Workers start with the `fleet-worker` skill, so every reply opens with a **headline**: `Done:`, `Need input:` or `Failed:`, which is what the last-reply column shows. A `finished` worker whose headline is `Need input:` is waiting on the user just like a `blocked` one. When reporting, lead with the workers that need the user: `blocked`, then `Need input:`, then `interrupted`, then `Failed:`, then the rest of `finished`.
 
+## End-of-task policy
+
+Before a worker gets its first task (`fleet new … --prompt-stdin`, or the first `send`/`broadcast` of a task), settle with the user how the task ends. A worker can't see a correction until its current turn ends, so the policy goes out once, in full, with the task.
+
+1. **Look up the policy, most specific first:**
+   - what the user says in this session (always wins);
+   - a `## Fleet` section in the target repo's `CLAUDE.md` or `AGENTS.md` (read it from `<repo>/main`, or from the repo root);
+   - a `## Fleet` section in the user's global `~/.claude/CLAUDE.md` (already in your context);
+   - the defaults below.
+2. **Settle three questions with the user**, offering what you found as the proposal:
+   - **Done means:** for work that ends in a PR, the default is that the tests pass, the PR is open and the linked issue is closed. For other work (an investigation, no PR), agree on what the hand-off must contain.
+   - **Who merges, and when:** the default is that *the worker merges its own PR* once the agreed conditions hold, and otherwise ends with a `Need input:` hand-off. This default takes effect only once the user agrees to it in this session. You relay; you don't merge.
+   - **Verification gate:** check that the repo has CI before you name it as a condition (`.github/workflows/` exists, or `gh pr checks` on a recent PR reports checks). Without CI, the gate is the full local test suite, named by its command (e.g. `python3 -m unittest discover -s tests`).
+3. **Put the agreed policy in full into each worker's first prompt**, even when it comes from the repo's `CLAUDE.md`. When a task spans several repos, each worker gets its own repo's policy.
+4. **Changing the policy mid-task is the exception.** If it happens, tell the user that each worker sees the change only after its current turn ends.
+
+The `## Fleet` section is free-form markdown read by agents, not parsed by the CLI. See the README for an example.
+
 ## Starting a worker
 
 `fleet new <repo> <branch>` opens window `<branch>` in the worktree `<repo>/<branch>`, next to `<repo>/main`, following the user's layout. It reuses that worktree or branch when it exists, and otherwise fetches origin and branches from its default branch. Worktrees are made and removed with `wt` (worktrunk), so the user's worktrunk hooks run: a new worktree's post-start hooks (e.g. a build that MCP servers need) finish before claude starts, so `fleet new` can take a minute.
 
 - **Choose the branch name** yourself: the Jira key when the work has one (`PROJ-123`), otherwise a short kebab-case slug (`fix-date-parsing`). Flat names only, since the name is also the directory.
 - `--no-worktree` runs in a directory as given (non-git directories, or the user wants no isolation). `--base REF`, `--mode M` (default `auto`), and extra claude args after `--` are on request.
-- `--prompt-stdin` hands the worker its first task once it is ready (see [Passing a prompt](#passing-a-prompt); there is no inline text form for `new`).
+- `--prompt-stdin` hands the worker its first task once it is ready (see [Passing a prompt](#passing-a-prompt); there is no inline text form for `new`). The first task carries the [end-of-task policy](#end-of-task-policy).
 - **Exit 3 is the folder-trust dialog.** Trusting is the user's call: ask, and on yes run `fleet keys <branch> Down Enter`. Trust is inherited by subdirectories, so trusting the repo root once covers every future worktree.
 
 The worker loads `/fleet-worker` as its first prompt and replies `Ready: ...`. Done when `fleet status` shows that reply (or the worker `busy` on its first task).
@@ -61,13 +79,13 @@ fleet saves stdin to a file under its state dir and has the worker "Read <file> 
 
 ## Relaying a turn
 
-1. `fleet send --prompt-stdin <worker>` with the prompt as above.
+1. `fleet send --prompt-stdin <worker>` with the prompt as above. If this is the worker's first prompt of a task, it includes the [end-of-task policy](#end-of-task-policy).
 2. `fleet wait <worker> [timeout]`: exit 0 when the turn after your send finished (or the worker exited), 5 when it was interrupted, 4 when `blocked`, 2 on timeout (check `fleet status` and decide whether to keep waiting). It keeps waiting while a prompt you queued behind a busy turn has not run yet.
 3. `fleet last <worker> [n]` prints the worker's last reply from its transcript; relay it faithfully: the headline, then what the body asks the user to act on.
 
 A turn is done when `fleet last` holds the reply to your prompt. On exit 5 someone stopped the turn: tell the user, and do not treat `fleet last` as the answer. On exit 4, run `fleet read <worker>` and relay the dialog to the user. On a `Need input:` headline, relay the question and send the user's answer back with `fleet send`.
 
-To send **one prompt to several workers**, use `fleet broadcast [--to w1,w2] [--wait SECS] --prompt-stdin` (all workers read the same file) instead of a loop: no `--to` means every tracked worker; a refusal (typed text, open dialog, unknown name) skips that worker only; `--wait` waits for all and prints each reply (exit 1 if any send failed, 4 if any blocked, 5 if any interrupted, 2 if any timed out). Same authority as `send`.
+To send **one prompt to several workers**, use `fleet broadcast [--to w1,w2] [--wait SECS] --prompt-stdin` (all workers read the same file) instead of a loop: no `--to` means every tracked worker; a refusal (typed text, open dialog, unknown name) skips that worker only; `--wait` waits for all and prints each reply (exit 1 if any send failed, 4 if any blocked, 5 if any interrupted, 2 if any timed out). Same authority as `send`. A broadcast that starts a task carries the [end-of-task policy](#end-of-task-policy). Since every recipient reads the same file, broadcast only to workers in the same repo, or to workers whose repos share one policy.
 
 To **steer mid-turn**, `fleet send --now` sends Ctrl+Enter: the worker drops the current turn and runs the new prompt. Plain `send` while busy queues the prompt. `fleet keys <worker> Escape` interrupts without a new prompt.
 
