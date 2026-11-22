@@ -1,7 +1,7 @@
 """fleet commands. Usage: fleet <command> [args]   (run `fleet help`)
 
-Every command takes a Ctx, which holds the system layer (tmux, git, wt), the clock and the output
-streams, so the tests can drive commands against fakes.
+Every command takes a Ctx, which holds the system layer (tmux, and git + wt behind Worktrees), the
+clock and the output streams, so the tests can drive commands against fakes.
 """
 
 import io
@@ -18,6 +18,7 @@ from . import lifecycle as lc
 from . import roster as R
 from . import screen as S
 from . import state as st
+from . import worktrees as W
 from .errors import FleetError, FleetExit
 from .system import Git, Tmux, Wt
 
@@ -70,12 +71,11 @@ STATUS_GLYPH = ("#{?#{==:#{@fleet_state},blocked},#[fg=red]⚠#[default],"
 
 
 class Ctx:
-    def __init__(self, tmux=None, git=None, wt=None, environ=None, out=None, err=None,
+    def __init__(self, tmux=None, worktrees=None, environ=None, out=None, err=None,
                  now=None, sleep=None, monotonic=None, fleet_path="", hook_path="", isatty=None,
                  cwd=None, stdin=None):
         self.tmux = tmux or Tmux()
-        self.git = git or Git()
-        self.wt = wt or Wt()
+        self.worktrees = worktrees or W.Worktrees(Git(), Wt(), say=self.say, warn=self.warn)
         self.environ = os.environ if environ is None else environ
         self.out = out or sys.stdout
         self.stdin = stdin or sys.stdin
@@ -217,93 +217,6 @@ def hooks_settings(hook_path, state_root):
                       for ev in lc.EVENTS}}
 
 
-def resolve_worktree(ctx, src, name, base):
-    """Find or make the worktree for branch `name` of the repo at `src` (<repo> or <repo>/main).
-    Returns (dir, repo)."""
-    if not valid_branch_name(ctx, name):
-        raise FleetError("'%s' is not a valid branch name" % name)
-    if os.path.basename(src) == "main" and os.path.exists(os.path.join(src, ".git")):
-        repo = os.path.dirname(src)
-    elif os.path.exists(os.path.join(src, "main", ".git")):
-        repo = src
-    else:
-        raise FleetError("%s does not follow <repo>/main (no git checkout at <repo>/main). "
-                         "Pass --no-worktree to run there without a worktree." % src)
-    main = os.path.join(repo, "main")
-    # Worktrees go through worktrunk (wt): its worktree-path template decides where they live,
-    # and its hooks (e.g. a post-start build) make them usable before claude starts.
-    if not ctx.wt.available():
-        raise FleetError("wt (worktrunk) not found; install it, or pass --no-worktree")
-    existing = _wt_path_of(ctx.wt.list_json(main), name)
-    if existing:
-        ctx.say("reusing worktree %s" % existing)
-        return existing, repo
-    if not ctx.git.ok(main, "fetch", "--quiet", "origin"):
-        ctx.warn("warning: git fetch failed; using local refs")
-    create, how = False, ""
-    if ctx.git.ok(main, "show-ref", "--verify", "--quiet", "refs/heads/" + name):
-        how = "from existing branch %s" % name
-    elif not base and ctx.git.ok(main, "show-ref", "--verify", "--quiet", "refs/remotes/origin/" + name):
-        how = "tracking origin/%s" % name  # wt switch creates the local tracking branch
-    else:
-        if not base:
-            base = default_base(ctx, main)
-        create, how = True, "on new branch %s from %s" % (name, base)
-    # --no-hooks, then run them here: wt switch would start post-start hooks in the background,
-    # and claude must not start (and spawn its MCP servers) before they finish.
-    rc, out = ctx.wt.switch(main, name, create=create, base=base)
-    if rc != 0:
-        raise FleetError("wt switch failed for %s" % name)
-    d = _switch_path(out)
-    if not d or not os.path.isdir(d):
-        raise FleetError("wt switch did not report the new worktree's path: %s" % out.strip())
-    ctx.say("worktree %s %s" % (d, how))
-    for h in ("pre-start", "post-start", "post-switch"):
-        ctx.say("running wt %s hooks..." % h)
-        if not ctx.wt.hook(d, h):
-            ctx.warn("warning: wt %s hooks failed in %s" % (h, d))
-    return d, repo
-
-
-def valid_branch_name(ctx, name):
-    rc, _ = ctx.git.run(".", "check-ref-format", "--branch", name)
-    return rc == 0
-
-
-def default_base(ctx, main):
-    b = ctx.git.out(main, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
-    if b:
-        return b
-    for cand in ("origin/main", "origin/master"):
-        if ctx.git.ok(main, "rev-parse", "--verify", "--quiet", cand):
-            return cand
-    raise FleetError("cannot find origin's default branch; pass --base REF")
-
-
-def _wt_path_of(list_json, branch):
-    try:
-        data = json.loads(list_json) if list_json.strip() else {}
-    except ValueError:
-        return ""
-    items = data.get("items", []) if isinstance(data, dict) else data
-    for it in items or []:
-        if isinstance(it, dict) and it.get("branch") == branch:
-            p = (it.get("worktree") or {}).get("path")
-            if p:
-                return p
-    return ""
-
-
-def _switch_path(out):
-    try:
-        d = json.loads(out)
-    except ValueError:
-        return ""
-    if not isinstance(d, dict):
-        return ""
-    return d.get("path") or d.get("worktree_path") or (d.get("worktree") or {}).get("path") or ""
-
-
 def await_prompt(ctx, pane, name, dirname):
     """Wait for claude's prompt box in `pane`. Exit 3 on the folder-trust dialog."""
     scr = None
@@ -339,9 +252,9 @@ def cmd_new(ctx, argv):
     if not o["worktree"]:
         d = src
     else:
-        d, repo = resolve_worktree(ctx, src, name, o["base"])
+        d, repo = ctx.worktrees.ensure(src, name, o["base"])
         d = os.path.realpath(d)
-        if d != os.path.join(repo, "main"):
+        if d != W.main_checkout(repo):
             wt = d
 
     ctx.store.ensure()
@@ -683,21 +596,12 @@ def cmd_rm(ctx, argv):
     pane = roster(ctx).lookup(name).pane
     rec = ctx.lifecycle.load(pane) or {}
     wt, repo, branch = rec.get("worktree") or "", rec.get("repo") or "", rec.get("branch") or ""
-    if wt and os.path.isdir(wt) and not o["force"]:
-        rc, porcelain = ctx.git.run(wt, "status", "--porcelain")
-        if rc != 0:
-            raise FleetError("cannot read git status of %s; not removing it (--force to discard anyway)" % wt)
-        if porcelain.strip():
-            _, short = ctx.git.run(wt, "status", "--short")
-            ctx.say(*short.splitlines()[:20])
-            raise FleetError("uncommitted changes in %s (above). Commit them, or re-run with --force to discard them." % wt)
+    if wt and not o["force"]:
+        ctx.worktrees.check_removable(wt)
     ctx.tmux.kill_window(pane)
     ctx.lifecycle.forget(pane)
     ctx.say("killed window '%s'" % name)
-    if wt and os.path.isdir(wt):
-        # wt remove runs the remove hooks; --no-delete-branch keeps the branch, --foreground so it is gone on return.
-        if not ctx.wt.remove(os.path.join(repo, "main"), wt, force=o["force"]):
-            raise FleetError("wt remove failed for %s" % wt)
+    if wt and ctx.worktrees.remove(repo, wt, force=o["force"]):
         ctx.say("removed worktree %s; branch %s kept" % (wt, branch))
     return 0
 

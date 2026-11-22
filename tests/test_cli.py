@@ -624,38 +624,42 @@ class LastAndRead(Fleet):
 class Rm(Fleet):
     def setUp(self):
         super().setUp()
-        self.wt = os.path.join(self.dir, "repo", "alpha")
-        os.makedirs(self.wt)
-        self.track(self.a, repo=os.path.join(self.dir, "repo"), worktree=self.wt, branch="alpha")
+        self.repo = os.path.join(self.dir, "repo")
+        self.wt = os.path.join(self.repo, "alpha")
+        self.track(self.a, repo=self.repo, worktree=self.wt, branch="alpha")
+        self.wts = self.ctx.worktrees
 
     def test_clean_worktree(self):
         code, out, _ = self.run_cmd("rm", "alpha")
         self.assertEqual(code, 0)
         self.assertEqual(out, "killed window 'alpha'\nremoved worktree %s; branch alpha kept\n" % self.wt)
         self.assertNotIn("%1", self.tmux.panes_)
-        self.assertEqual(self.ctx.wt.removed, [(os.path.join(self.dir, "repo", "main"), self.wt, False)])
+        self.assertEqual(self.wts.calls, [("check_removable", self.wt), ("remove", self.repo, self.wt, False)])
         self.assertFalse(os.path.exists(self.ctx.store.path("%1")))
 
-    def test_dirty_worktree_refused(self):
-        self.ctx.git.responses[("status", "--porcelain")] = (0, " M x.py\n")
-        self.ctx.git.responses[("status", "--short")] = (0, " M x.py\n")
+    def test_refused_worktree_keeps_the_window(self):
+        self.wts.errors["check_removable"] = FleetError("uncommitted changes in %s (above)" % self.wt)
         code, out, err = self.run_cmd("rm", "alpha")
-        self.assertEqual(code, 1)
-        self.assertEqual(out, " M x.py\n")
-        self.assertIn("uncommitted changes", err)
+        self.assertEqual((code, err), (1, "fleet: uncommitted changes in %s (above)\n" % self.wt))
         self.assertIn("%1", self.tmux.panes_)
+        self.assertTrue(os.path.exists(self.ctx.store.path("%1")))
+        self.assertEqual([c[0] for c in self.wts.calls], ["check_removable"])
 
-    def test_git_status_failure_refuses(self):
-        self.ctx.git.responses[("status", "--porcelain")] = (128, "")
-        code, _, err = self.run_cmd("rm", "alpha")
-        self.assertEqual(code, 1)
-        self.assertIn("%1", self.tmux.panes_)
-
-    def test_force(self):
-        self.ctx.git.responses[("status", "--porcelain")] = (0, " M x.py\n")
+    def test_force_skips_the_check(self):
         code, _, _ = self.run_cmd("rm", "--force", "alpha")
         self.assertEqual(code, 0)
-        self.assertEqual(self.ctx.wt.removed[0][2], True)
+        self.assertEqual(self.wts.calls, [("remove", self.repo, self.wt, True)])
+
+    def test_worktree_already_gone(self):
+        self.wts.removed = False
+        code, out, _ = self.run_cmd("rm", "alpha")
+        self.assertEqual((code, out), (0, "killed window 'alpha'\n"))
+
+    def test_without_worktree(self):
+        self.track(self.a, repo="", worktree="", branch="")
+        code, out, _ = self.run_cmd("rm", "alpha")
+        self.assertEqual((code, out), (0, "killed window 'alpha'\n"))
+        self.assertEqual(self.wts.calls, [])
 
     def test_orchestrator(self):
         self.assertEqual(self.run_cmd("rm", "orch")[2], "fleet: 'orch' is the orchestrator's pane, not a worker\n")
@@ -666,9 +670,10 @@ class New(Fleet):
     def setUp(self):
         super().setUp()
         self.repo = os.path.realpath(os.path.join(self.dir, "repo"))
-        os.makedirs(os.path.join(self.repo, "main", ".git"))
         self.new_wt = os.path.join(self.repo, "feat")
         os.makedirs(self.new_wt)
+        self.wts = self.ctx.worktrees
+        self.wts.ensured = (self.new_wt, self.repo)
 
     def test_validation(self):
         for argv, msg in (
@@ -678,23 +683,25 @@ class New(Fleet):
             (["new", self.repo, "x", "--prompt-file", "/nope.md"], "no such prompt file"),
             (["new", "/nope", "x"], "no such directory"),
             (["new", self.repo, "alpha"], "already runs in 'fleet'"),
-            (["new", self.dir, "x"], "does not follow <repo>/main"),
         ):
             code, _, err = self.run_cmd(*argv)
             self.assertEqual(code, 1, argv)
             self.assertIn(msg, err, argv)
+        self.assertEqual(self.wts.calls, [])
 
-    def test_new_branch_from_default(self):
-        self.ctx.git.responses[("show-ref", "--verify", "--quiet", "refs/heads/feat")] = (1, "")
-        self.ctx.git.responses[("show-ref", "--verify", "--quiet", "refs/remotes/origin/feat")] = (1, "")
-        self.ctx.git.responses[("symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")] = (0, "origin/main\n")
-        self.ctx.wt.switch_result = (0, json.dumps({"path": self.new_wt}))
+    def test_worktree_errors_pass_through(self):
+        self.wts.errors["ensure"] = FleetError("%s does not follow <repo>/main" % self.dir)
+        code, _, err = self.run_cmd("new", self.dir, "x")
+        self.assertEqual((code, err), (1, "fleet: %s does not follow <repo>/main\n" % self.dir))
+        self.assertEqual([p.window for p in self.tmux.panes_.values() if p.window == "x"], [])
+
+    def test_in_a_worktree(self):
         pf = os.path.join(self.dir, "task.md")
         open(pf, "w").close()
-        code, out, err = self.run_cmd("new", self.repo, "feat", "--prompt-file", pf, "--", "--model", "haiku")
+        code, out, err = self.run_cmd("new", self.repo, "feat", "--base", "origin/dev", "--prompt-file", pf,
+                                      "--", "--model", "haiku")
         self.assertEqual((code, err), (0, ""), out)
-        self.assertEqual(self.ctx.wt.calls[0], ("switch", os.path.join(self.repo, "main"), "feat", True, "origin/main"))
-        self.assertEqual([c[2] for c in self.ctx.wt.calls[1:]], ["pre-start", "post-start", "post-switch"])
+        self.assertEqual(self.wts.calls, [("ensure", self.repo, "feat", "origin/dev")])
         pane = [p for p in self.tmux.panes_.values() if p.window == "feat"][0]
         rec = st.Store.load(self.ctx.store.path(pane.id))
         self.assertEqual({k: rec[k] for k in ("name", "session", "pane", "dir", "repo", "worktree", "branch", "mode", "state")},
@@ -706,14 +713,32 @@ class New(Fleet):
         self.assertEqual(launched, "FLEET_STATE_DIR=%s claude /fleet-worker --name feat --permission-mode auto --settings %s --model haiku"
                          % (self.dir, hooks))
         self.assertEqual(submitted, "Read %s and do what it says." % pf)
-        self.assertIn("worktree %s on new branch feat from origin/main" % self.new_wt, out)
         settings = json.load(open(hooks))
         self.assertEqual(sorted(settings["hooks"]), sorted(lc.EVENTS))
         self.assertEqual(settings["hooks"]["Stop"][0]["hooks"][0]["command"],
                          "FLEET_STATE_DIR=%s /opt/fleet/scripts/fleet-hook Stop" % self.dir)
 
+    def test_on_the_main_checkout(self):
+        main = os.path.join(self.repo, "main")
+        os.makedirs(main)
+        self.wts.ensured = (main, self.repo)
+        code, out, err = self.run_cmd("new", main, "main")
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertEqual(self.wts.calls, [("ensure", main, "main", "")])
+        pane = [p for p in self.tmux.panes_.values() if p.window == "main"][0]
+        rec = st.Store.load(self.ctx.store.path(pane.id))
+        self.assertEqual((rec["dir"], rec["repo"], rec["worktree"], rec["branch"]), (main, self.repo, "", "main"))
+
+    def test_no_worktree(self):
+        code, out, err = self.run_cmd("new", "--no-worktree", self.dir, "plain")
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertEqual(self.wts.calls, [])
+        pane = [p for p in self.tmux.panes_.values() if p.window == "plain"][0]
+        rec = st.Store.load(self.ctx.store.path(pane.id))
+        self.assertEqual((rec["dir"], rec["repo"], rec["worktree"], rec["branch"]),
+                         (os.path.realpath(self.dir), "", "", ""))
+
     def test_prompt_stdin(self):
-        self.ctx.wt.list_out = json.dumps({"items": [{"branch": "feat", "worktree": {"path": self.new_wt}}]})
         self.ctx.stdin = io.StringIO("line 1\nline 2\n")
         code, out, err = self.run_cmd("new", self.repo, "feat", "--prompt-stdin")
         self.assertEqual((code, err), (0, ""), out)
@@ -723,35 +748,6 @@ class New(Fleet):
         self.assertEqual(sent, "Read %s and do what it says." % path)
         with open(path, encoding="utf-8") as f:
             self.assertEqual(f.read(), "line 1\nline 2\n")
-
-    def test_reuses_existing_worktree(self):
-        self.ctx.wt.list_out = json.dumps({"items": [{"branch": "feat", "worktree": {"path": self.new_wt}}]})
-        code, out, _ = self.run_cmd("new", os.path.join(self.repo, "main"), "feat")
-        self.assertEqual(code, 0)
-        self.assertIn("reusing worktree %s" % self.new_wt, out)
-        self.assertEqual(self.ctx.wt.calls, [])
-
-    def test_existing_branch(self):
-        self.ctx.wt.switch_result = (0, json.dumps({"worktree": {"path": self.new_wt}}))
-        code, out, _ = self.run_cmd("new", self.repo, "feat")
-        self.assertEqual(code, 0)
-        self.assertEqual(self.ctx.wt.calls[0][3], False)
-        self.assertIn("from existing branch feat", out)
-
-    def test_switch_without_path(self):
-        self.ctx.wt.switch_result = (0, "{}")
-        code, _, err = self.run_cmd("new", self.repo, "feat")
-        self.assertEqual(code, 1)
-        self.assertIn("did not report the new worktree's path", err)
-
-    def test_no_default_branch(self):
-        for ref in ("refs/heads/feat", "refs/remotes/origin/feat"):
-            self.ctx.git.responses[("show-ref", "--verify", "--quiet", ref)] = (1, "")
-        self.ctx.git.responses[("symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")] = (1, "")
-        for b in ("origin/main", "origin/master"):
-            self.ctx.git.responses[("rev-parse", "--verify", "--quiet", b)] = (1, "")
-        code, _, err = self.run_cmd("new", self.repo, "feat")
-        self.assertEqual((code, err), (1, "fleet: cannot find origin's default branch; pass --base REF\n"))
 
     def test_trust_dialog_exits_3(self):
         def new_window(session, name, cwd):

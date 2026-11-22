@@ -170,23 +170,6 @@ class FakeTmux(Tmux):
         return [c for c in self.calls if c and c[0] == "send-keys" and c[2] == pane]
 
 
-class FakeGit:
-    def __init__(self):
-        self.responses = {}  # tuple(args) -> (rc, out)
-        self.calls = []
-
-    def run(self, repo, *args, check=False):
-        self.calls.append((repo,) + args)
-        return self.responses.get(args, (0, ""))
-
-    def ok(self, repo, *args):
-        return self.run(repo, *args)[0] == 0
-
-    def out(self, repo, *args):
-        rc, out = self.run(repo, *args)
-        return out.strip() if rc == 0 else ""
-
-
 class FakeWt:
     def __init__(self):
         self.calls = []
@@ -213,6 +196,32 @@ class FakeWt:
         return True
 
 
+class FakeWorktrees:
+    """Stub Worktrees for CLI tests: answers set by the test, calls recorded."""
+
+    def __init__(self):
+        self.calls = []
+        self.ensured = None  # (dir, repo) that ensure returns
+        self.errors = {}  # method name -> FleetError it raises
+        self.removed = True  # what remove returns (False: the worktree was already gone)
+
+    def _call(self, name, *args):
+        self.calls.append((name,) + args)
+        if name in self.errors:
+            raise self.errors[name]
+
+    def ensure(self, src, branch, base=""):
+        self._call("ensure", src, branch, base)
+        return self.ensured
+
+    def check_removable(self, worktree):
+        self._call("check_removable", worktree)
+
+    def remove(self, repo, worktree, force=False):
+        self._call("remove", repo, worktree, force)
+        return self.removed
+
+
 class Clock:
     """Fake time: sleep advances it."""
 
@@ -232,14 +241,14 @@ class Clock:
             self.on_sleep(self.t)
 
 
-def make_ctx(tmux=None, state_dir=None, environ=None, clock=None, git=None, wt=None):
+def make_ctx(tmux=None, state_dir=None, environ=None, clock=None, worktrees=None):
     env = {"TMUX": "/tmp/tmux-1/default,1,0", "TMUX_PANE": "%0"}
     if state_dir:
         env["FLEET_STATE_DIR"] = state_dir
     env.update(environ or {})
     clock = clock or Clock()
-    ctx = cli.Ctx(tmux=tmux or FakeTmux(own_pane=env.get("TMUX_PANE", "")), git=git or FakeGit(),
-                  wt=wt or FakeWt(), environ=env, out=io.StringIO(), err=io.StringIO(),
+    ctx = cli.Ctx(tmux=tmux or FakeTmux(own_pane=env.get("TMUX_PANE", "")),
+                  worktrees=worktrees or FakeWorktrees(), environ=env, out=io.StringIO(), err=io.StringIO(),
                   now=clock.now, sleep=clock.sleep, monotonic=clock.monotonic,
                   fleet_path="/opt/fleet/scripts/fleet", hook_path="/opt/fleet/scripts/fleet-hook",
                   isatty=lambda: False, cwd=lambda: "/work")

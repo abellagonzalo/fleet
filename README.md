@@ -107,6 +107,8 @@ a running turn.
   - `lifecycle.py`: the worker record and every change to it (hook events, send, keys, reconcile
     from the screen), and what `wait` and `status` see.
   - `state.py`: storage for the worker records.
+  - `worktrees.py`: the `<repo>/main` layout rule, find-or-create a worktree for a branch (for
+    `new`), and removing one only when it is clean (for `rm`).
   - `system.py`: the only place that runs tmux, git or wt.
   - `hook.py`: the hook: parses the event and hands it to `lifecycle.py`.
 
