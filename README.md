@@ -109,7 +109,9 @@ a running turn.
   - `state.py`: storage for the worker records.
   - `worktrees.py`: the `<repo>/main` layout rule, find-or-create a worktree for a branch (for
     `new`), and removing one only when it is clean (for `rm`).
-  - `system.py`: the only place that runs tmux, git or wt.
+  - `system.py`: the only place that runs tmux, git or wt. A pane's keyboard and screen are a
+    `Terminal` (type, submit, press, screen, scrollback); its tmux adapter owns key encoding,
+    typing pace and the guards that keep keys off the orchestrator's pane and your own.
   - `hook.py`: the hook: parses the event and hands it to `lifecycle.py`.
 
 ## Development

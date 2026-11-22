@@ -1,15 +1,20 @@
 """The thin layer over tmux, git and wt. Everything that runs a process goes through here, so the tests
-can swap in fakes (tests/fakes.py) with the same methods.
+can swap in fakes (tests/fakes.py), or swap out the process runner to test this layer itself.
 
 Safety rule enforced here, not by callers: tmux is never given an empty target (`-t ""` means the
-current pane), and keys are only ever sent to an explicit pane id ("%12") that is not the pane this
-command runs in.
+current pane), and keys are only ever sent, through a Terminal, to an explicit pane id ("%12") that is
+neither the pane this command runs in nor an orchestrator's (unless opened for one, by `fleet up`).
 """
 
 import os
 import subprocess
+import time
 
 from .errors import FleetError
+from .screen import Screen
+
+DELAY_DEFAULT = 0.02  # seconds between typed characters, unless FLEET_DELAY says otherwise
+CTRL_ENTER = "\x1b[13;5u"  # Ctrl+Enter as CSI-u: interrupt the turn and run the prompt now
 
 
 def _run(argv, cwd=None, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, input=None,
@@ -38,15 +43,20 @@ PANE_FIELDS = ("window_name", "pane_id", "pane_current_command", "@fleet_name", 
 
 
 class Tmux:
-    """tmux, one method per operation fleet needs."""
+    """tmux's sessions, windows and options, one method per operation fleet needs. A pane's keyboard
+    and screen are a Terminal: `terminal(pane)`."""
 
-    def __init__(self, own_pane=None):
+    def __init__(self, own_pane=None, run=None):
         # The pane this command runs in (the orchestrator, when it is the caller). Never a target.
         self.own_pane = own_pane if own_pane is not None else os.environ.get("TMUX_PANE", "")
-        self._checked = set()  # panes verified not to be an orchestrator
+        self._run = run or _run
 
     def _tmux(self, *args, check=True, timeout=None):
-        return _run(["tmux"] + list(args), check=check, timeout=timeout)
+        return self._run(["tmux"] + list(args), check=check, timeout=timeout)
+
+    def terminal(self, pane, orchestrator_ok=False, delay=DELAY_DEFAULT, sleep=time.sleep):
+        """The keyboard and screen of `pane`. orchestrator_ok only for `fleet up` starting one."""
+        return TmuxTerminal(self, pane, orchestrator_ok, delay, sleep)
 
     # ---- queries ----
 
@@ -79,39 +89,11 @@ class Tmux:
                 res[pid] = name
         return res
 
-    def capture(self, pane, ansi=False, scrollback=0):
-        args = ["capture-pane", "-p", "-t", _target(pane)]
-        if ansi:
-            args.append("-e")
-        if scrollback:
-            args += ["-S", "-%d" % scrollback]
-        return self._tmux(*args).stdout
-
-    # ---- changes ----
-
     def pane_role(self, pane):
         """The pane's @fleet_role ("orch" for an orchestrator, else "")."""
         return self._tmux("display", "-p", "-t", _target(pane), "#{@fleet_role}").stdout.strip()
 
-    def _pane_for_keys(self, pane, orch_ok=False):
-        _target(pane)
-        if not pane.startswith("%"):
-            raise FleetError("internal: keys go to pane ids only, not %r" % pane)
-        if self.own_pane and pane == self.own_pane:
-            raise FleetError("internal: refusing to send keys to this pane (%s), the caller's own" % pane)
-        if not orch_ok:
-            if pane not in self._checked:
-                if self.pane_role(pane) == "orch":
-                    raise FleetError("internal: refusing to send keys to %s, an orchestrator's pane" % pane)
-                self._checked.add(pane)
-        return pane
-
-    def send_keys(self, pane, *keys, orch_ok=False):
-        """tmux key names (Enter, Escape, Down, C-u...). orch_ok only for `fleet up` starting one."""
-        self._tmux("send-keys", "-t", self._pane_for_keys(pane, orch_ok), *keys)
-
-    def send_literal(self, pane, text, orch_ok=False):
-        self._tmux("send-keys", "-t", self._pane_for_keys(pane, orch_ok), "-l", text)
+    # ---- changes ----
 
     def set_window_option(self, target, name, value, check=True, timeout=None):
         self._tmux("set", "-w", "-t", _target(target), name, value, check=check, timeout=timeout)
@@ -135,6 +117,67 @@ class Tmux:
     def attach(self, session):
         """Replace this process with `tmux attach` (only when run from a terminal)."""
         os.execvp("tmux", ["tmux", "attach", "-t", "=" + _target(session)])
+
+
+class TmuxTerminal:
+    """The Terminal port over tmux: one pane's keyboard (type, submit, press) and screen (screen,
+    scrollback). Owns how keys are encoded and paced, and the pane guards."""
+
+    def __init__(self, tmux, pane, orchestrator_ok=False, delay=DELAY_DEFAULT, sleep=time.sleep):
+        self._server = tmux
+        self.pane = _target(pane)
+        self._orchestrator_ok = orchestrator_ok
+        self._delay = delay
+        self._sleep = sleep
+        self._checked = False  # keys allowed: the guards have passed once
+
+    def _keys(self, *args):
+        self._guard()
+        self._server._tmux("send-keys", "-t", self.pane, *args)
+
+    def _guard(self):
+        if self._checked:
+            return
+        pane = self.pane
+        if not pane.startswith("%"):
+            raise FleetError("internal: keys go to pane ids only, not %r" % pane)
+        if self._server.own_pane and pane == self._server.own_pane:
+            raise FleetError("internal: refusing to send keys to this pane (%s), the caller's own" % pane)
+        if not self._orchestrator_ok and self._server.pane_role(pane) == "orch":
+            raise FleetError("internal: refusing to send keys to %s, an orchestrator's pane" % pane)
+        self._checked = True
+
+    def type(self, text, paced=True):
+        """Type `text` literally: a key at a time at the human pace a Claude Code prompt box needs,
+        or, paced=False, in one go (a shell command line)."""
+        if not paced:
+            self._keys("-l", text)
+            return
+        for ch in text:
+            self._keys("-l", ch)
+            self._sleep(self._delay)
+
+    def submit(self, now=False):
+        """Enter; now=True: Ctrl+Enter, which interrupts a running turn and runs the prompt now."""
+        if now:
+            self._keys("-l", CTRL_ENTER)
+        else:
+            self._keys("Enter")
+
+    def press(self, *keys):
+        """tmux key names: Enter, Escape, Down, C-u..."""
+        self._keys(*keys)
+
+    def screen(self):
+        """What the pane shows now, with attributes (a grey suggestion is not typed text)."""
+        return Screen(self._capture("-e"), ansi=True)
+
+    def scrollback(self, n):
+        """The pane as plain text, with `n` lines of history above the screen."""
+        return self._capture("-S", "-%d" % n) if n else self._capture()
+
+    def _capture(self, *args):
+        return self._server._tmux("capture-pane", "-p", "-t", self.pane, *args).stdout
 
 
 class Git:

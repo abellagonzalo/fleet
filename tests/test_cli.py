@@ -172,7 +172,7 @@ class Targets(Fleet):
         for argv in (["send", "%0", "hi"], ["keys", "%0", "Enter"], ["broadcast", "--to", "%0,orch,%3,%4", "hi"],
                      ["send", "me", "hi"], ["keys", "orch", "Enter"]):
             self.assertNotEqual(cli.run(ctx, argv), 0, argv)
-        self.assertEqual([c for c in tmux.calls if c and c[0] == "send-keys"], [])
+        self.assertEqual(tmux.intents(), [])
         self.assertEqual(cli.run(ctx, ["send", "w1", "hi"]), 0)
 
     def test_split_window_sends_to_the_worker_pane(self):
@@ -182,7 +182,7 @@ class Targets(Fleet):
         code, _, err = self.run_cmd("send", "alpha", "hi")
         self.assertEqual((code, err), (0, ""))
         self.assertEqual(self.a.submitted, [("hi", "enter")])
-        self.assertEqual(self.tmux.keys_sent_to("%5"), [])
+        self.assertEqual(self.tmux.panes_["%5"].intents, [])
 
     def test_broadcast_discovers_the_session_once(self):
         asked = []
@@ -203,22 +203,7 @@ class Targets(Fleet):
             code, _, err = self.run_cmd(*argv)
             self.assertNotEqual(code, 0, argv)
             self.assertTrue(err.startswith("fleet: "), argv)
-        self.assertEqual(self.tmux.keys_sent_to("%0"), [])
-        self.assertEqual(self.tmux.keys_sent_to(""), [])
-
-    def test_system_layer_refuses_orchestrators_even_when_not_our_pane(self):
-        self.tmux.own_pane = "%9"
-        for send in (lambda: self.tmux.send_keys("%0", "Enter"), lambda: self.tmux.send_literal("%0", "x")):
-            with self.assertRaisesRegex(FleetError, "an orchestrator's pane"):
-                send()
-        self.assertEqual(self.tmux.keys_sent_to("%0"), [])
-
-    def test_system_layer_refuses_own_and_empty_panes(self):
-        for pane in ("%0", "", "fleet:0"):
-            with self.assertRaises(FleetError, msg=pane):
-                self.tmux.send_keys(pane, "Enter")
-            with self.assertRaises(FleetError, msg=pane):
-                self.tmux.send_literal(pane, "x")
+        self.assertEqual(self.orch.intents, [])
 
 
 class Send(Fleet):
@@ -227,9 +212,7 @@ class Send(Fleet):
         self.assertEqual((code, err), (0, ""))
         self.assertEqual(out, "sent to alpha: fix the bug\n")
         self.assertEqual(self.a.submitted, [("fix the bug", "enter")])
-        # typed one character at a time
-        literals = [c for c in self.tmux.keys_sent_to("%1") if "-l" in c]
-        self.assertEqual(len(literals), len("fix the bug"))
+        self.assertEqual(self.a.intents, [("type", "fix the bug", True), ("submit", False)])
         r = self.rec(self.a)
         self.assertEqual((r["state"], r["sent_seq"]), ("busy", r["seq"]))
         self.assertEqual(self.tmux.window_options[("%1", "@fleet_state")], "busy")
@@ -237,12 +220,7 @@ class Send(Fleet):
     def test_prompt_is_recorded_before_it_is_submitted(self):
         # the prompt's UserPromptSubmit can fire the moment Enter lands: it must order after the send
         seen = []
-        send_keys = self.tmux.send_keys
-
-        def spy(pane, *keys, **kw):
-            seen.append(self.rec(self.a).get("sent_seq"))
-            return send_keys(pane, *keys, **kw)
-        self.tmux.send_keys = spy
+        self.a.on_submit = lambda: seen.append(self.rec(self.a).get("sent_seq"))
         self.run_cmd("send", "alpha", "go")
         self.assertEqual(seen, [1])
 
@@ -250,14 +228,14 @@ class Send(Fleet):
         code, out, _ = self.run_cmd("send", "--now", "alpha", "stop that")
         self.assertEqual(code, 0)
         self.assertEqual(out, "sent (now) to alpha: stop that\n")
-        self.assertEqual(self.a.submitted, [("stop that", "now")])
+        self.assertEqual(self.a.intents, [("type", "stop that", True), ("submit", True)])
 
     def test_refuses_typed_text(self):
-        self.a.screen = fixture("typed_text.ansi")
+        self.a.shown = fixture("typed_text.ansi")
         code, _, err = self.run_cmd("send", "alpha", "hi")
         self.assertEqual(code, 1)
         self.assertIn("prompt box already holds: 'hello typed text'", err)
-        self.assertEqual(self.tmux.keys_sent_to("%1"), [])
+        self.assertEqual(self.a.intents, [])
 
     def test_force_appends_to_typed_text(self):
         self.a.typed = "draft "
@@ -273,20 +251,20 @@ class Send(Fleet):
 
     def test_refuses_dialogs(self):
         for fx in ("permission_dialog.ansi", "ask_user_question.ansi", "trust_dialog.ansi"):
-            self.a.screen = fixture(fx)
+            self.a.shown = fixture(fx)
             for flags in ([], ["--now"], ["--force"]):
                 code, out, err = self.run_cmd("send", *(flags + ["alpha", "hi"]))
                 self.assertEqual(code, 1, (fx, flags))
                 self.assertIn("shows a dialog", err)
                 self.assertIn("Esc to cancel", out)  # the dialog is shown
-        self.assertEqual(self.tmux.keys_sent_to("%1"), [])
+        self.assertEqual(self.a.intents, [])
 
     def test_refuses_without_a_prompt_box(self):
-        self.a.screen = "user@host ~ $ \n"
+        self.a.shown = "user@host ~ $ \n"
         code, _, err = self.run_cmd("send", "alpha", "hi")
         self.assertEqual(code, 1)
         self.assertIn("no claude prompt box", err)
-        self.assertEqual(self.tmux.keys_sent_to("%1"), [])
+        self.assertEqual(self.a.intents, [])
 
     def test_does_not_submit_unseen_text(self):
         self.a.echo = False
@@ -353,14 +331,14 @@ class PromptStdin(Fleet):
         for argv in (["send", "--prompt-file", "/nope.md", "alpha"], ["broadcast", "--prompt-file", "/nope.md"]):
             code, _, err = self.run_cmd(*argv)
             self.assertEqual((code, err), (1, "fleet: no such prompt file: /nope.md\n"), argv)
-        self.assertEqual(self.tmux.keys_sent_to("%1"), [])
+        self.assertEqual(self.a.intents, [])
 
     def test_empty_stdin(self):
         for argv in (["send", "--prompt-stdin", "alpha"], ["broadcast", "--prompt-stdin"]):
             self.ctx.stdin = io.StringIO("  \n")
             code, _, err = self.run_cmd(*argv)
             self.assertEqual((code, err), (1, "fleet: --prompt-stdin: stdin is empty; nothing to send\n"), argv)
-        self.assertEqual(self.tmux.keys_sent_to("%1"), [])
+        self.assertEqual(self.a.intents, [])
 
     def test_terminal_stdin(self):
         tty = io.StringIO("")
@@ -377,13 +355,13 @@ class Wait(Fleet):
 
     def test_finished_after_send(self):
         self.track(self.a, state="busy", sent_seq=1, seq=1)
-        self.a.screen = fixture("busy.ansi")
+        self.a.shown = fixture("busy.ansi")
 
         def tick(t):
             if self.clock.now() >= 1_000_005 and self.rec(self.a)["state"] == "busy":
                 self.hook(self.a, "UserPromptSubmit", prompt="go")
                 self.hook(self.a, "Stop", last_assistant_message="ok")
-                self.a.screen = fixture("done.ansi")
+                self.a.shown = fixture("done.ansi")
         self.clock.on_sleep = tick
         code, out, _ = self.run_cmd("wait", "alpha", "60")
         self.assertEqual((code, out), (0, "finished\n"))
@@ -395,7 +373,7 @@ class Wait(Fleet):
 
     def test_interrupt_is_seen(self):
         self.track(self.a, state="busy", heard_at=self.clock.now() - 10, sent_seq=1, submit_seq=2, seq=2)
-        self.a.screen = fixture("interrupted.ansi")
+        self.a.shown = fixture("interrupted.ansi")
         code, out, _ = self.run_cmd("wait", "alpha", "5")
         self.assertEqual((code, out), (5, "interrupted\n"))
         self.assertEqual(self.rec(self.a)["outcome"], "interrupted")
@@ -411,7 +389,7 @@ class Wait(Fleet):
 
     def test_timeout_is_wall_clock(self):
         self.track(self.a, state="busy")
-        self.a.screen = fixture("busy.ansi")
+        self.a.shown = fixture("busy.ansi")
         start = self.clock.t
         code, _, _ = self.run_cmd("wait", "alpha", "30")
         self.assertEqual(code, 2)
@@ -427,7 +405,7 @@ class Broadcast(Fleet):
         self.assertEqual(self.b.submitted, [("rebase on main", "enter")])
 
     def test_a_refusal_skips_only_that_worker(self):
-        self.a.screen = fixture("typed_text.ansi")
+        self.a.shown = fixture("typed_text.ansi")
         code, out, err = self.run_cmd("broadcast", "--to", "alpha,ghost,beta", "go")
         self.assertEqual(code, 1)
         self.assertEqual(out, "NOT sent to alpha (reason above)\nNOT sent to ghost (reason above)\nsent to beta\n")
@@ -436,7 +414,7 @@ class Broadcast(Fleet):
         self.assertEqual(self.b.submitted, [("go", "enter")])
 
     def test_a_dialog_refusal_shows_the_dialog(self):
-        self.a.screen = fixture("permission_dialog.ansi")
+        self.a.shown = fixture("permission_dialog.ansi")
         code, out, err = self.run_cmd("broadcast", "go")
         self.assertEqual(code, 1)
         self.assertIn("fleet: 'alpha' shows a dialog (above)", err)
@@ -445,7 +423,7 @@ class Broadcast(Fleet):
         self.assertEqual(self.b.submitted, [("go", "enter")])
 
     def test_a_missing_prompt_box_shows_the_screen(self):
-        self.a.screen = "user@host ~ $ \n"
+        self.a.shown = "user@host ~ $ \n"
         code, out, err = self.run_cmd("broadcast", "go")
         self.assertEqual(code, 1)
         self.assertIn("no claude prompt box on 'alpha' (screen above)", err)
@@ -455,7 +433,7 @@ class Broadcast(Fleet):
     def test_orchestrator_is_never_a_recipient(self):
         code, out, _ = self.run_cmd("broadcast", "--to", "orch", "go")
         self.assertEqual(code, 1)
-        self.assertEqual(self.tmux.keys_sent_to("%0"), [])
+        self.assertEqual(self.orch.intents, [])
 
     def test_no_workers(self):
         for p in ("%1", "%2"):
@@ -475,8 +453,8 @@ class Broadcast(Fleet):
         tp = os.path.join(self.dir, "t.jsonl")
         with open(tp, "w") as f:
             f.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "rebased"}]}}) + "\n")
-        self.a.screen = fixture("busy.ansi")
-        self.b.screen = fixture("busy.ansi")
+        self.a.shown = fixture("busy.ansi")
+        self.b.shown = fixture("busy.ansi")
 
         life = self.ctx.lifecycle
 
@@ -488,8 +466,8 @@ class Broadcast(Fleet):
                 life.hook_event("%2", "PermissionRequest", {"tool_name": "AskUserQuestion"})
         self.a.screens = [box_screen()]
         self.b.screens = [box_screen()]
-        self.a.screen = None
-        self.b.screen = None
+        self.a.shown = None
+        self.b.shown = None
         self.clock.on_sleep = tick
         code, out, _ = self.run_cmd("broadcast", "--wait", "20", "rebase")
         self.assertEqual(code, 4)
@@ -503,7 +481,7 @@ class Broadcast(Fleet):
         def tick(t):
             if self.a.submitted and self.rec(self.a).get("submit_seq") is None:
                 life.hook_event("%1", "UserPromptSubmit", {"prompt": "rebase"})
-                self.a.screen = fixture("interrupted.ansi")  # Escape; no Stop fires
+                self.a.shown = fixture("interrupted.ansi")  # Escape; no Stop fires
             if self.b.submitted and self.rec(self.b)["state"] != "idle":
                 life.hook_event("%2", "UserPromptSubmit", {"prompt": "rebase"})
                 life.hook_event("%2", "Stop", {"last_assistant_message": "rebased"})
@@ -518,7 +496,7 @@ class Broadcast(Fleet):
         def tick(t):
             for p in panes:
                 if p.submitted:
-                    p.screen = fixture("busy.ansi")
+                    p.shown = fixture("busy.ansi")
         self.clock.on_sleep = tick
 
     def test_wait_shares_one_deadline(self):
@@ -538,13 +516,13 @@ class Broadcast(Fleet):
 
         def tick(t):
             if self.b.submitted:
-                self.b.screen = busy
-            if self.a.submitted and self.a.screen is None:
-                self.a.screen = busy
+                self.b.shown = busy
+            if self.a.submitted and self.a.shown is None:
+                self.a.shown = busy
             if t - start >= 25 and self.rec(self.a)["state"] != "idle":
                 life.hook_event("%1", "UserPromptSubmit", {"prompt": "rebase"})
                 life.hook_event("%1", "Stop", {"last_assistant_message": "rebased"})
-                self.a.screen = fixture("done.ansi")
+                self.a.shown = fixture("done.ansi")
         self.clock.on_sleep = tick
         code, out, _ = self.run_cmd("broadcast", "--wait", "30", "rebase")
         self.assertEqual(code, 2)
@@ -559,7 +537,7 @@ class Status(Fleet):
                    last_message="all\n  good")
         self.track(self.b, state="blocked", detail="permission: Bash and a very long detail",
                    state_since=self.clock.now() - 1)
-        self.b.screen = fixture("permission_dialog.ansi")
+        self.b.shown = fixture("permission_dialog.ansi")
         self.tmux.add("fleet", "byhand", "%6")  # a claude started by hand
         self.tmux.add("fleet", "sh", "%7", command="zsh")
         code, out, _ = self.run_cmd("status")
@@ -581,7 +559,7 @@ class Status(Fleet):
 
     def test_reconciles_and_sweeps(self):
         self.track(self.a, state="busy", heard_at=self.clock.now() - 10)
-        self.a.screen = fixture("question_cancelled.ansi")
+        self.a.shown = fixture("question_cancelled.ansi")
         # beta's pane was reused by something that is not beta
         self.b.fleet_name = ""
         # a worker of another session is left alone
@@ -625,7 +603,7 @@ class Keys(Fleet):
         self.track(self.a, state="blocked")
         code, _, _ = self.run_cmd("keys", "alpha", "Down", "Enter")
         self.assertEqual(code, 0)
-        self.assertEqual(self.tmux.keys_sent_to("%1")[-1], ("send-keys", "-t", "%1", "Down", "Enter"))
+        self.assertEqual(self.a.intents, [("press", ("Down", "Enter"))])
         self.assertEqual(self.rec(self.a)["state"], "busy")
 
 class LastAndRead(Fleet):
@@ -672,7 +650,7 @@ class LastAndRead(Fleet):
         self.assertEqual(self.run_cmd("last", "alpha")[1], "from the hook\n")
 
     def test_read_drops_blank_lines(self):
-        self.a.screen = "a\n\nb\n\n"
+        self.a.shown = "a\n\nb\n\n"
         self.assertEqual(self.run_cmd("read", "alpha")[1], "a\nb\n")
 
 
@@ -764,6 +742,7 @@ class New(Fleet):
                           "worktree": self.new_wt, "branch": "feat", "mode": "auto", "state": "busy"})
         self.assertEqual(self.tmux.pane_options[(pane.id, "@fleet_name")], "feat")
         launched, submitted = pane.submitted[0][0], pane.submitted[1][0]
+        self.assertEqual(pane.intents[:2], [("type", launched, False), ("submit", False)])  # the shell line in one go
         hooks = os.path.join(self.dir, "hooks.json")
         self.assertEqual(launched, "FLEET_STATE_DIR=%s claude /fleet-worker --name feat --permission-mode auto --settings %s --model haiku"
                          % (self.dir, hooks))
@@ -807,7 +786,7 @@ class New(Fleet):
     def test_trust_dialog_exits_3(self):
         def new_window(session, name, cwd):
             p = self.tmux.add(session, name)
-            p.screen = fixture("trust_dialog.ansi")
+            p.shown = fixture("trust_dialog.ansi")
             return p.id
         self.tmux.new_window = new_window
         pf = os.path.join(self.dir, "task.md")
@@ -821,7 +800,7 @@ class New(Fleet):
     def test_prompt_box_timeout(self):
         def new_window(session, name, cwd):
             p = self.tmux.add(session, name)
-            p.screen = "$ claude\n"
+            p.shown = "$ claude\n"
             return p.id
         self.tmux.new_window = new_window
         code, out, err = self.run_cmd("new", "--no-worktree", self.dir, "plain")
@@ -833,15 +812,10 @@ class New(Fleet):
         # each screen capture takes a second: the 60 s budget must include that time
         def new_window(session, name, cwd):
             p = self.tmux.add(session, name)
-            p.screen = "$ claude\n"
+            p.shown = "$ claude\n"
+            p.on_screen = lambda: setattr(self.clock, "t", self.clock.t + 1)
             return p.id
         self.tmux.new_window = new_window
-        capture = self.tmux.capture
-
-        def slow_capture(pane, ansi=False, scrollback=0):
-            self.clock.t += 1
-            return capture(pane, ansi=ansi, scrollback=scrollback)
-        self.tmux.capture = slow_capture
         start = self.clock.t
         code, _, _ = self.run_cmd("new", "--no-worktree", self.dir, "plain")
         self.assertEqual(code, 1)
@@ -859,6 +833,8 @@ class Up(unittest.TestCase):
         pane = list(tmux.panes_.values())[0]
         self.assertEqual((pane.session, pane.window), ("fleet-x", "orch"))
         self.assertEqual(tmux.pane_options[(pane.id, "@fleet_role")], "orch")
+        self.assertEqual(pane.opened, [True])
+        self.assertEqual([i[2] for i in pane.intents if i[0] == "type"], [False])  # the shell line in one go
         self.assertEqual(pane.submitted[0][0],
                          "claude /fleet-orchestrator --name fleet-x --permission-mode auto --allowedTools 'Bash(/opt/fleet/scripts/fleet *)' --model opus")
         self.assertEqual(cli.run(ctx, ["up", "x"]), 1)

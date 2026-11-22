@@ -1,7 +1,7 @@
 """fleet commands. Usage: fleet <command> [args]   (run `fleet help`)
 
-Every command takes a Ctx, which holds the system layer (tmux, and git + wt behind Worktrees), the
-clock and the output streams, so the tests can drive commands against fakes.
+Every command takes a Ctx, which holds the system layer (tmux, a pane's Terminal, and git + wt behind
+Worktrees), the clock and the output streams, so the tests can drive commands against fakes.
 """
 
 import io
@@ -20,12 +20,10 @@ from . import screen as S
 from . import state as st
 from . import worktrees as W
 from .errors import FleetError, FleetExit
-from .system import Git, Tmux, Wt
+from .system import DELAY_DEFAULT, Git, Tmux, Wt
 
-DELAY_DEFAULT = 0.02  # seconds between typed characters
 TYPED_TIMEOUT = 2.0  # how long typed text may take to show up in the prompt box
 PROMPT_TIMEOUT = 60  # how long a new claude may take to show its prompt box
-CTRL_ENTER = "\x1b[13;5u"  # Ctrl+Enter as CSI-u: interrupt the turn and run the prompt now
 
 HELP = """\
 fleet up [name] [--detach] [-- claude args]   create tmux session fleet[-name], orchestrator claude in window 0 'orch'
@@ -91,6 +89,11 @@ class Ctx:
         self.lifecycle = lc.Lifecycle(self.store, lambda: self.now(), glyph=self._glyph)
         self.delay = float(self.environ.get("FLEET_DELAY") or DELAY_DEFAULT)
 
+    def terminal(self, pane, orchestrator_ok=False):
+        """The Terminal of `pane`: the only way commands send it keys or read its screen.
+        orchestrator_ok only for `fleet up` starting the orchestrator."""
+        return self.tmux.terminal(pane, orchestrator_ok=orchestrator_ok, delay=self.delay, sleep=self.sleep)
+
     def quiet(self):
         """The same context with stdout discarded (broadcast runs send this way; its refusals carry their screen)."""
         c = Ctx.__new__(Ctx)
@@ -122,19 +125,17 @@ def roster(ctx, session=None):
     return R.Roster(s, panes, tracked, ctx.environ.get("TMUX_PANE", ""))
 
 
-def capture(ctx, pane):
-    return S.Screen(ctx.tmux.capture(pane, ansi=True), ansi=True)
-
-
 # ---------- state ----------
 
 def screen_classifier(ctx, pane):
     """(look, recheck) for the lifecycle: what the pane's screen shows ('dialog' | 'busy' | 'quiet',
     None when unreadable), now and after a pause."""
 
+    term = ctx.terminal(pane) if pane else None
+
     def look():
         try:
-            return capture(ctx, pane).classify() if pane else None
+            return term.screen().classify() if term else None
         except FleetError:
             return None
 
@@ -188,8 +189,9 @@ def cmd_up(ctx, argv):
     ctx.tmux.set_pane_option(pane, "@fleet_role", "orch")
     cmd = ["claude", "/fleet-orchestrator", "--name", s, "--permission-mode", o["mode"],
            "--allowedTools", "Bash(%s *)" % ctx.fleet_path] + o["extra"]
-    ctx.tmux.send_literal(pane, _shell_line(cmd, ctx), orch_ok=True)
-    ctx.tmux.send_keys(pane, "Enter", orch_ok=True)
+    term = ctx.terminal(pane, orchestrator_ok=True)
+    term.type(_shell_line(cmd, ctx), paced=False)
+    term.submit()
     if not o["detach"] and not ctx.environ.get("TMUX") and ctx.isatty():
         ctx.tmux.attach(s)
     ctx.say("fleet '%s' up: orchestrator in window 0 (%s)." % (s, cwd))
@@ -219,11 +221,11 @@ def hooks_settings(hook_path, state_root):
 
 def await_prompt(ctx, pane, name, dirname):
     """Wait for claude's prompt box in `pane`. Exit 3 on the folder-trust dialog."""
-    scr = None
+    term, scr = ctx.terminal(pane), None
     deadline = ctx.monotonic() + PROMPT_TIMEOUT
     while ctx.monotonic() < deadline:
         ctx.sleep(1)
-        scr = capture(ctx, pane)
+        scr = term.screen()
         if scr.is_trust_dialog():
             raise FleetExit(3, "trust-prompt: claude asks whether to trust %s. Ask the user; on yes run: "
                                "fleet keys %s Down Enter" % (dirname, name))
@@ -269,8 +271,9 @@ def cmd_new(ctx, argv):
                          branch=name if repo else "", mode=o["mode"])
 
     cmd = ["claude", "/fleet-worker", "--name", name, "--permission-mode", o["mode"], "--settings", hooks] + o["extra"]
-    ctx.tmux.send_literal(pane, _shell_line(cmd, ctx))
-    ctx.tmux.send_keys(pane, "Enter")
+    term = ctx.terminal(pane)
+    term.type(_shell_line(cmd, ctx), paced=False)
+    term.submit()
     try:
         await_prompt(ctx, pane, name, d)
     except (FleetError, FleetExit):
@@ -288,7 +291,8 @@ def cmd_new(ctx, argv):
 def send(ctx, w, text, now=False, force=False):
     """Type `text` into the prompt box of `w` (a Roster handle) and submit it."""
     pane, name = w.pane, w.name
-    scr = capture(ctx, pane)
+    term = ctx.terminal(pane)
+    scr = term.screen()
     if scr.has_dialog():
         raise FleetError("'%s' shows a dialog (above); answer it with: fleet keys %s <key>" % (name, name),
                          screen=scr.tail(12))
@@ -299,13 +303,11 @@ def send(ctx, w, text, now=False, force=False):
         raise FleetError("prompt box already holds: '%s' (someone typed there). "
                          "Re-run with --force to append anyway." % box.typed)
     # A grey suggested prompt (box.ghost) is not text anyone typed: the first typed key replaces it.
-    for ch in text:
-        ctx.tmux.send_literal(pane, ch)
-        ctx.sleep(ctx.delay)
+    term.type(text)
     deadline = ctx.monotonic() + TYPED_TIMEOUT
     while True:
         ctx.sleep(0.3)
-        scr = capture(ctx, pane)
+        scr = term.screen()
         if S.shows_typed(scr, text):
             break
         if ctx.monotonic() >= deadline:
@@ -314,10 +316,7 @@ def send(ctx, w, text, now=False, force=False):
     if ctx.lifecycle.is_tracked(pane):
         # before the key press, so the prompt's UserPromptSubmit and Stop are ordered after it
         ctx.lifecycle.prompt_sent(pane)
-    if now:
-        ctx.tmux.send_literal(pane, CTRL_ENTER)
-    else:
-        ctx.tmux.send_keys(pane, "Enter")
+    term.submit(now=now)
     ctx.say("sent%s to %s: %s" % (" (now)" if now else "", name, text))
     return 0
 
@@ -505,7 +504,7 @@ def broadcast_code(failed, blocked, timed_out, interrupted=False):
 def cmd_read(ctx, argv):
     o = A.parse_read(argv)
     pane = roster(ctx).lookup(o["name"]).pane
-    text = ctx.tmux.capture(pane, scrollback=o["n"])
+    text = ctx.terminal(pane).scrollback(o["n"])
     for line in text.split("\n"):
         if line:
             ctx.say(line)
@@ -583,7 +582,7 @@ def cmd_last(ctx, argv):
 def cmd_keys(ctx, argv):
     o = A.parse_keys(argv)
     pane = roster(ctx).lookup(o["name"]).pane
-    ctx.tmux.send_keys(pane, *o["keys"])
+    ctx.terminal(pane).press(*o["keys"])
     ctx.lifecycle.dialog_answered(pane)
     return 0
 

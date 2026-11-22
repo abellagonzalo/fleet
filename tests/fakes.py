@@ -2,6 +2,7 @@
 
 import io
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -9,7 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(HERE), "scripts"))
 
 from fleetlib import cli  # noqa: E402
 from fleetlib.errors import FleetError  # noqa: E402
-from fleetlib.system import Tmux  # noqa: E402
+from fleetlib.screen import Screen  # noqa: E402
 
 FIXTURES = os.path.join(HERE, "fixtures")
 
@@ -31,6 +32,8 @@ def box_screen(typed="", ghost="", footer="  \x1b[38;5;246m⏸ manual mode on\x1
 
 
 class FakePane:
+    """A pane: what tmux knows about it, plus what its terminal holds (see FakeTerminal)."""
+
     def __init__(self, pane_id, window, session, fleet_name="", role="", command="2.1.329"):
         self.id = pane_id
         self.window = window
@@ -39,27 +42,81 @@ class FakePane:
         self.role = role
         self.command = command
         self.typed = ""  # what has been typed into a live prompt box
-        self.screen = None  # fixed screen (raw ansi), or None for a live prompt box
-        self.screens = []  # queued screens returned one per capture before `screen`
-        self.submitted = []  # (text, how) for every Enter / Ctrl+Enter
+        self.shown = None  # fixed screen (raw ansi), or None for a live prompt box
+        self.screens = []  # queued screens returned one per screen read before `shown`
+        self.intents = []  # ("type", text, paced) | ("submit", now) | ("press", keys), in order
+        self.submitted = []  # (what the box held, "enter" | "now") at every submit
+        self.opened = []  # orchestrator_ok of every Terminal opened on this pane
         self.ghost = ""
         self.echo = True  # does typing show up in the prompt box?
+        self.on_submit = None  # callback() just before a submit lands
+        self.on_screen = None  # callback() on every screen read
 
     def render(self):
+        if self.on_screen:
+            self.on_screen()
         if self.screens:
             return self.screens.pop(0)
-        if self.screen is not None:
-            return self.screen
+        if self.shown is not None:
+            return self.shown
         if self.typed:
             return box_screen(typed=self.typed if self.echo else "")
         return box_screen(ghost=self.ghost)
 
 
-class FakeTmux(Tmux):
-    """Real key-target guards (inherited), fake everything that would run tmux."""
+class FakeTerminal:
+    """The Terminal port over a FakePane: records intents and serves the pane's screens. By default
+    the screen is a prompt box holding what was typed, so send's visibility check passes.
+
+    Keys to the caller's own pane, or to an orchestrator's not opened with orchestrator_ok, fail the
+    test outright: the commands must refuse those before opening a Terminal."""
+
+    def __init__(self, tmux, pane_id, orchestrator_ok):
+        self.tmux = tmux
+        self.pane_id = pane_id
+        self.orchestrator_ok = orchestrator_ok
+        if pane_id in tmux.panes_:
+            tmux.panes_[pane_id].opened.append(orchestrator_ok)
+
+    @property
+    def p(self):
+        """The pane, looked up on every use: like tmux, a gone pane fails when used, not when opened."""
+        if self.pane_id not in self.tmux.panes_:
+            raise FleetError("can't find pane %s" % self.pane_id)
+        return self.tmux.panes_[self.pane_id]
+
+    def _key(self, intent):
+        p = self.p
+        if p.id == self.tmux.own_pane or (p.role == "orch" and not self.orchestrator_ok):
+            raise AssertionError("keys %r to %s, which fleet must never type into" % (intent, p.id))
+        p.intents.append(intent)
+
+    def type(self, text, paced=True):
+        self._key(("type", text, paced))
+        self.p.typed += text
+
+    def submit(self, now=False):
+        if self.p.on_submit:
+            self.p.on_submit()
+        self._key(("submit", now))
+        self.p.submitted.append((self.p.typed, "now" if now else "enter"))
+        self.p.typed = ""
+
+    def press(self, *keys):
+        self._key(("press", keys))
+
+    def screen(self):
+        return Screen(self.p.render(), ansi=True)
+
+    def scrollback(self, n):
+        return re.sub(r"\x1b\[[0-9;:]*m", "", self.p.render())
+
+
+class FakeTmux:
+    """Sessions, windows and options of a fake tmux server; terminal() opens a FakeTerminal."""
 
     def __init__(self, own_pane="%0"):
-        super().__init__(own_pane=own_pane)
+        self.own_pane = own_pane
         self.panes_ = {}
         self.calls = []
         self.window_options = {}
@@ -77,6 +134,15 @@ class FakeTmux(Tmux):
         p = FakePane(pane_id, window, session, **kw)
         self.panes_[pane_id] = p
         return p
+
+    def terminal(self, pane, orchestrator_ok=False, delay=0, sleep=None):
+        if not pane:
+            raise AssertionError("a terminal on an empty target")
+        return FakeTerminal(self, pane, orchestrator_ok)
+
+    def intents(self):
+        """Every pane's intents, as (pane id, intent)."""
+        return [(p.id, i) for p in self.panes_.values() for i in p.intents]
 
     # ---- queries ----
     def sessions(self):
@@ -111,39 +177,8 @@ class FakeTmux(Tmux):
             raise FleetError("can't find pane %s" % pane)
         return self.panes_[pane].role
 
-    def capture(self, pane, ansi=False, scrollback=0):
-        if not pane:
-            raise AssertionError("capture with an empty target")
-        self.calls.append(("capture", pane))
-        if pane not in self.panes_:
-            raise FleetError("can't find pane %s" % pane)
-        raw = self.panes_[pane].render()
-        if not ansi:
-            import re
-            raw = re.sub(r"\x1b\[[0-9;:]*m", "", raw)
-        return raw
-
     # ---- changes ----
-    def _tmux(self, *args, check=True):
-        self.calls.append(args)
-        if args[0] == "send-keys":
-            pane = args[2]
-            p = self.panes_[pane]
-            if "-l" in args:
-                text = args[args.index("-l") + 1]
-                if text == cli.CTRL_ENTER:
-                    p.submitted.append((p.typed, "now"))
-                    p.typed = ""
-                else:
-                    p.typed += text
-            else:
-                for k in args[3:]:
-                    if k == "Enter":
-                        p.submitted.append((p.typed, "enter"))
-                        p.typed = ""
-        return None
-
-    def set_window_option(self, target, name, value, check=True):
+    def set_window_option(self, target, name, value, check=True, timeout=None):
         self.window_options[(target, name)] = value
 
     def set_pane_option(self, target, name, value):
@@ -165,9 +200,6 @@ class FakeTmux(Tmux):
 
     def attach(self, session):
         self.calls.append(("attach", session))
-
-    def keys_sent_to(self, pane):
-        return [c for c in self.calls if c and c[0] == "send-keys" and c[2] == pane]
 
 
 class FakeWt:
@@ -252,6 +284,5 @@ def make_ctx(tmux=None, state_dir=None, environ=None, clock=None, worktrees=None
                   now=clock.now, sleep=clock.sleep, monotonic=clock.monotonic,
                   fleet_path="/opt/fleet/scripts/fleet", hook_path="/opt/fleet/scripts/fleet-hook",
                   isatty=lambda: False, cwd=lambda: "/work")
-    ctx.delay = 0
     ctx.clock = clock
     return ctx
