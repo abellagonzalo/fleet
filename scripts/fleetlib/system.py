@@ -12,12 +12,15 @@ import subprocess
 from .errors import FleetError
 
 
-def _run(argv, cwd=None, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, input=None):
+def _run(argv, cwd=None, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, input=None,
+         timeout=None):
     try:
         p = subprocess.run(argv, cwd=cwd, stdout=stdout, stderr=stderr, input=input,
-                           universal_newlines=True)
+                           universal_newlines=True, timeout=timeout)
     except FileNotFoundError:
         raise FleetError("%s not found" % argv[0])
+    except subprocess.TimeoutExpired:
+        raise FleetError("%s timed out after %ss" % (" ".join(argv[:3]), timeout))
     if check and p.returncode != 0:
         err = (p.stderr or "").strip() if stderr == subprocess.PIPE else ""
         raise FleetError("%s failed (exit %d)%s" % (" ".join(argv[:3]), p.returncode,
@@ -42,8 +45,8 @@ class Tmux:
         self.own_pane = own_pane if own_pane is not None else os.environ.get("TMUX_PANE", "")
         self._checked = set()  # panes verified not to be an orchestrator
 
-    def _tmux(self, *args, check=True):
-        return _run(["tmux"] + list(args), check=check)
+    def _tmux(self, *args, check=True, timeout=None):
+        return _run(["tmux"] + list(args), check=check, timeout=timeout)
 
     # ---- queries ----
 
@@ -110,8 +113,8 @@ class Tmux:
     def send_literal(self, pane, text, orch_ok=False):
         self._tmux("send-keys", "-t", self._pane_for_keys(pane, orch_ok), "-l", text)
 
-    def set_window_option(self, target, name, value, check=True):
-        self._tmux("set", "-w", "-t", _target(target), name, value, check=check)
+    def set_window_option(self, target, name, value, check=True, timeout=None):
+        self._tmux("set", "-w", "-t", _target(target), name, value, check=check, timeout=timeout)
 
     def set_pane_option(self, target, name, value):
         self._tmux("set", "-p", "-t", _target(target), name, value)

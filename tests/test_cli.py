@@ -12,6 +12,7 @@ from fakes import Clock, FakeTmux, box_screen, fixture, make_ctx
 
 from fleetlib import args as A
 from fleetlib import cli
+from fleetlib import lifecycle as lc
 from fleetlib import state as st
 from fleetlib.errors import FleetError
 
@@ -729,7 +730,7 @@ class New(Fleet):
         self.assertEqual(submitted, "Read %s and do what it says." % pf)
         self.assertIn("worktree %s on new branch feat from origin/main" % self.new_wt, out)
         settings = json.load(open(hooks))
-        self.assertEqual(sorted(settings["hooks"]), sorted(st.HOOK_EVENTS))
+        self.assertEqual(sorted(settings["hooks"]), sorted(lc.EVENTS))
         self.assertEqual(settings["hooks"]["Stop"][0]["hooks"][0]["command"],
                          "FLEET_STATE_DIR=%s /opt/fleet/scripts/fleet-hook Stop" % self.dir)
 
