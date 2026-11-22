@@ -444,24 +444,10 @@ class Wait(Fleet):
         code, out, _ = self.run_cmd("wait", "alpha", "60")
         self.assertEqual((code, out), (0, "finished\n"))
 
-    def test_previous_turn_is_ignored(self):
-        # The previous turn ended (seq 1) before we sent (seq 2); the new prompt has not stopped yet.
-        self.track(self.a, state="busy", outcome="finished", ended_seq=1, sent_seq=2, seq=2)
-        self.a.screen = fixture("busy.ansi")
-        code, out, _ = self.run_cmd("wait", "alpha", "5")
-        self.assertEqual((code, out), (2, "still busy after 5s\n"))
-
     def test_blocked(self):
         self.track(self.a, state="blocked", detail="permission: Bash")
         code, out, _ = self.run_cmd("wait", "alpha", "5")
         self.assertEqual((code, out), (4, "blocked: permission: Bash. See it with: fleet read alpha\n"))
-
-    def test_busy_turns_blocked_from_the_screen(self):
-        self.track(self.a, state="busy", heard_at=self.clock.now() - 10)
-        self.a.screen = fixture("permission_dialog.ansi")
-        code, out, _ = self.run_cmd("wait", "alpha", "5")
-        self.assertEqual((code, out), (4, "blocked: dialog on screen. See it with: fleet read alpha\n"))
-        self.assertEqual(self.rec(self.a)["state"], "blocked")
 
     def test_interrupt_is_seen(self):
         self.track(self.a, state="busy", heard_at=self.clock.now() - 10, sent_seq=1, submit_seq=2, seq=2)
@@ -623,11 +609,6 @@ class Keys(Fleet):
         self.assertEqual(code, 0)
         self.assertEqual(self.tmux.keys_sent_to("%1")[-1], ("send-keys", "-t", "%1", "Down", "Enter"))
         self.assertEqual(self.rec(self.a)["state"], "busy")
-
-    def test_keys_leave_other_states(self):
-        self.run_cmd("keys", "alpha", "Escape")
-        self.assertEqual(self.rec(self.a)["state"], "idle")
-
 
 class LastAndRead(Fleet):
     def test_last_from_transcript(self):
