@@ -107,8 +107,9 @@ CLI doesn't parse it:
 that the text landed, and then presses Enter. It refuses if the prompt box holds text you typed,
 if a dialog is open, or if claude has exited. Long prompts go through `--prompt-stdin` or
 `--prompt-file`: the worker is told "Read <file> and do what it says.", so newlines, quotes and
-length all survive. `fleet broadcast` sends one prompt to many workers, and `send --now` interrupts
-a running turn.
+length all survive. A prompt whose first line is a slash command is typed as that command instead,
+with any lines after it passed to the command through a file. `fleet broadcast` sends one prompt to
+many workers, and `send --now` interrupts a running turn.
 
 ## Repository layout
 

@@ -36,6 +36,8 @@ fleet new <repo|repo/main> <branch> [opts]     worker window <branch> in worktre
     --mode M             permission mode (default auto)
     --prompt-file P      once ready, send "Read P and do what it says."
     --prompt-stdin       the same, with stdin saved to a file under the state dir
+                         Either way, a prompt whose first line is a slash command is typed as that
+                         line, with the lines after it passed as "(also read <file> and follow it)"
     -- args              extra claude args
 fleet status [--json]                          every worker: state (starting|idle|busy|blocked|exited), outcome of
                                                its last turn (finished|interrupted), age, detail, last reply
@@ -45,6 +47,7 @@ fleet send [--now] [--force] <worker> <text>   type text like a human, verify it
                                                --prompt-file P (instead of <text>): send "Read P and do what it says."
                                                --prompt-stdin (instead of <text>): the same, with stdin saved to a file
                                                under the state dir. Both keep newlines; use them for long prompts.
+                                               A slash command on the first line is typed as-is (see new).
                                                Use only one of <text>, --prompt-file and --prompt-stdin.
 fleet broadcast [--to w1,w2] [--now] [--force] [--wait SECS] <text | --prompt-file P | --prompt-stdin>
                                                send to every tracked worker (or only --to); a refusal skips that
@@ -237,16 +240,13 @@ def await_prompt(ctx, pane, name, dirname):
 
 def cmd_new(ctx, argv):
     o = A.parse_new(argv)
-    name, src, pfile = o["name"], o["src"], o["prompt_file"]
+    name, src = o["name"], o["src"]
     ros = roster(ctx)
     ros.check_new_name(name)
     s = ros.session
-    if pfile:
-        pfile = prompt_path(pfile)
     if not os.path.isdir(src):
         raise FleetError("no such directory: %s" % src)
-    if o["prompt_stdin"]:
-        pfile = stdin_prompt(ctx)  # read now: stdin is not there to read after a minute of wt hooks
+    prompt = prompt_text(ctx, o)  # read now: stdin is not there to read after a minute of wt hooks
     src = os.path.realpath(src)
 
     repo = wt = ""
@@ -277,19 +277,21 @@ def cmd_new(ctx, argv):
     try:
         await_prompt(ctx, pane, name, d)
     except (FleetError, FleetExit):
-        if pfile:
-            ctx.warn('prompt not sent; once the worker is ready run: fleet send %s "%s"'
-                     % (name, read_prompt_file(pfile)))
+        if prompt:
+            ctx.warn("prompt not sent; once the worker is ready run: fleet send %s %s"
+                     % (shlex.quote(name), shlex.quote(prompt[0])))
         raise
     ctx.say("ready: worker '%s' in %s (mode %s). Attach: tmux attach -t %s, then select window '%s'"
             % (name, d, o["mode"], s, name))
-    if pfile:
-        return send(ctx, roster(ctx, session=s).lookup(name), read_prompt_file(pfile))
+    if prompt:
+        text, form = prompt
+        return send(ctx, roster(ctx, session=s).lookup(name), text, form=form)
     return 0
 
 
-def send(ctx, w, text, now=False, force=False):
-    """Type `text` into the prompt box of `w` (a Roster handle) and submit it."""
+def send(ctx, w, text, now=False, force=False, form=""):
+    """Type `text` into the prompt box of `w` (a Roster handle) and submit it. `form`: how the text
+    was made from a prompt (see typed_prompt), shown in the output line."""
     pane, name = w.pane, w.name
     term = ctx.terminal(pane)
     scr = term.screen()
@@ -317,24 +319,47 @@ def send(ctx, w, text, now=False, force=False):
         # before the key press, so the prompt's UserPromptSubmit and Stop are ordered after it
         ctx.lifecycle.prompt_sent(pane)
     term.submit(now=now)
-    ctx.say("sent%s to %s: %s" % (" (now)" if now else "", name, text))
+    ctx.say("sent%s to %s%s: %s" % (" (now)" if now else "", name, form_note(form), text))
     return 0
+
+
+SLASH_COMMAND = re.compile(r"/[A-Za-z0-9_:-]+(\s|$)")
+
+
+def slash_command(content):
+    """(first line, rest) when the prompt's first line is a slash command, else None. Claude Code runs a
+    slash command only when it is the first thing typed. Leading and trailing blank lines don't count;
+    `rest` holds the lines after the first ("" if none), without blank lines around them."""
+    lines = content.strip().splitlines()
+    if not lines or not SLASH_COMMAND.match(lines[0].strip()):
+        return None
+    rest = lines[1:]
+    while rest and not rest[0].strip():
+        rest.pop(0)
+    while rest and not rest[-1].strip():
+        rest.pop()
+    return lines[0].strip(), "".join(line + "\n" for line in rest)
 
 
 def read_prompt_file(path):
     return "Read %s and do what it says." % path
 
 
-def stdin_prompt(ctx):
-    """Save stdin to a new file under the state dir and return its path. Workers are told to read
-    the file instead of having the text typed in: typing is slow for long prompts and flattens
-    newlines. The file is kept, since a worker reads it after fleet has exited."""
+def read_stdin(ctx):
+    """The prompt piped in for --prompt-stdin."""
     if ctx.stdin.isatty():
         raise FleetError("--prompt-stdin: stdin is a terminal; pipe the prompt in "
                          "(e.g. fleet ... --prompt-stdin < prompt.md)")
     text = ctx.stdin.read()
     if not text.strip():
         raise FleetError("--prompt-stdin: stdin is empty; nothing to send")
+    return text
+
+
+def save_prompt(ctx, text):
+    """Save `text` to a new file under the state dir and return its path. Workers are told to read
+    the file instead of having the text typed in: typing is slow for long prompts and flattens
+    newlines. The file is kept, since a worker reads it after fleet has exited."""
     d = os.path.join(ctx.store.root, "prompts")
     os.makedirs(d, exist_ok=True)
     fd, path = tempfile.mkstemp(prefix="prompt-%d-" % ctx.now(), suffix=".md", dir=d)
@@ -351,19 +376,50 @@ def prompt_path(path):
     return os.path.abspath(path)
 
 
+SLASH_FORM = "slash command"
+
+
+def typed_prompt(ctx, content, path=""):
+    """(text to type, form) for a prompt given by file or stdin. `path`: the file `content` came
+    from (--prompt-file), else "" and it is saved under the state dir if a file is needed.
+    A slash command on the first line is typed as-is so Claude Code runs it (form SLASH_FORM); any
+    lines after it go to a new file the command is told to read. Anything else: "Read <file> ..." (form "")."""
+    cmd = slash_command(content)
+    if cmd is None:
+        return read_prompt_file(path or save_prompt(ctx, content)), ""
+    first, rest = cmd
+    if not rest:
+        return first, SLASH_FORM
+    return "%s (also read %s and follow it)" % (first, save_prompt(ctx, rest)), SLASH_FORM
+
+
+def form_note(form):
+    """The form for an output line: " (slash command)", or "" for text typed as given."""
+    return " (%s)" % form if form else ""
+
+
+def prompt_file_content(path):
+    with open(path, encoding="utf-8", errors="replace") as f:
+        return f.read()
+
+
 def prompt_text(ctx, o):
-    """What to type for a parsed send/broadcast: the text itself, or an instruction to read the
-    --prompt-file or the file --prompt-stdin was saved to."""
+    """(text to type, form) for a parsed new/send/broadcast: the inline text itself, or what
+    typed_prompt makes of --prompt-file or --prompt-stdin. None for `new` without a prompt."""
     if o["prompt_file"]:
-        return read_prompt_file(prompt_path(o["prompt_file"]))
+        path = prompt_path(o["prompt_file"])
+        return typed_prompt(ctx, prompt_file_content(path), path)
     if o["prompt_stdin"]:
-        return read_prompt_file(stdin_prompt(ctx))
-    return o["text"]
+        return typed_prompt(ctx, read_stdin(ctx))
+    if o.get("text"):
+        return o["text"], ""
+    return None
 
 
 def cmd_send(ctx, argv):
     o = A.parse_send(argv)
-    return send(ctx, roster(ctx).lookup(o["name"]), prompt_text(ctx, o), now=o["now"], force=o["force"])
+    text, form = prompt_text(ctx, o)
+    return send(ctx, roster(ctx).lookup(o["name"]), text, now=o["now"], force=o["force"], form=form)
 
 
 WAIT_CODES = {"finished": 0, "exited": 0, "idle": 0, "interrupted": 5, "blocked": 4}
@@ -445,19 +501,19 @@ def cmd_broadcast(ctx, argv):
     targets = [(n, n) for n in o["to"]] or [(h.name, h.pane) for h in ros.workers()]
     if not targets:
         raise FleetError("no workers to send to")
-    text = prompt_text(ctx, o)  # resolved once: with --prompt-stdin every recipient reads one file
+    text, form = prompt_text(ctx, o)  # decided once: every recipient is typed the same text
     sent, rc = [], 0
     for name, query in targets:
         try:
             h = ros.lookup(query)
-            send(ctx.quiet(), h, text, now=o["now"], force=o["force"])
+            send(ctx.quiet(), h, text, now=o["now"], force=o["force"], form=form)
         except FleetError as e:
             report_error(ctx, e)
             ctx.say("NOT sent to %s (reason above)" % name)
             rc = 1
         else:
             sent.append((name, h))
-            ctx.say("sent to %s" % name)
+            ctx.say("sent to %s%s" % (name, form_note(form)))
     if o["wait"] is None:
         return rc
     # One deadline for all: the wait takes about --wait seconds however many workers stay busy.

@@ -59,7 +59,7 @@ The `## Fleet` section is free-form markdown read by agents, not parsed by the C
 
 - **Choose the branch name** yourself: the Jira key when the work has one (`PROJ-123`), otherwise a short kebab-case slug (`fix-date-parsing`). Flat names only, since the name is also the directory.
 - `--no-worktree` runs in a directory as given (non-git directories, or the user wants no isolation). `--base REF`, `--mode M` (default `auto`), and extra claude args after `--` are on request.
-- `--prompt-stdin` hands the worker its first task once it is ready (see [Passing a prompt](#passing-a-prompt); there is no inline text form for `new`). The first task carries the [end-of-task policy](#end-of-task-policy).
+- `--prompt-stdin` hands the worker its first task once it is ready (see [Passing a prompt](#passing-a-prompt), including slash commands; there is no inline text form for `new`). The first task carries the [end-of-task policy](#end-of-task-policy).
 - **Exit 3 is the folder-trust dialog.** Trusting is the user's call: ask, and on yes run `fleet keys <branch> Down Enter`. Trust is inherited by subdirectories, so trusting the repo root once covers every future worktree.
 
 The worker loads `/fleet-worker` as its first prompt and replies `Ready: ...`. Done when `fleet status` shows that reply (or the worker `busy` on its first task).
@@ -72,7 +72,9 @@ The worker loads `/fleet-worker` as its first prompt and replies `Ready: ...`. D
     <prompt>
     EOF
 
-fleet saves stdin to a file under its state dir and has the worker "Read <file> and do what it says.", so newlines, quotes and length all survive.
+Unless the prompt starts with a slash command (below), fleet saves stdin to a file under its state dir and has the worker "Read <file> and do what it says.", so newlines, quotes and length all survive.
+
+**Slash commands** (`/implement GitHub issue #62`) run only when they are on the prompt's first line: fleet then types that line as-is, so the worker runs the command, and appends any lines after it to the command's arguments as a file to read (`/cmd args (also read <file> and follow it)`). A slash command anywhere else is plain text. This works with `--prompt-stdin` and `--prompt-file` on `new`, `send` and `broadcast`, so `fleet new … --prompt-stdin` can start a worker straight on a command, with the end-of-task policy on the lines below it.
 
 - **Inline text** only for a very short prompt: one line, such as an answer to a `Need input:` question (`fleet send <worker> "yes, option 2"`). Every character is typed into the pane and newlines become spaces.
 - **`--prompt-file <path>`** only for a very long, detailed prompt: a spec the user wants to read or edit before it goes out, or one several workers share across turns. Write it to a file, have the user approve it, then send the path.
@@ -85,7 +87,7 @@ fleet saves stdin to a file under its state dir and has the worker "Read <file> 
 
 A turn is done when `fleet last` holds the reply to your prompt. On exit 5 someone stopped the turn: tell the user, and do not treat `fleet last` as the answer. On exit 4, run `fleet read <worker>` and relay the dialog to the user. On a `Need input:` headline, relay the question and send the user's answer back with `fleet send`.
 
-To send **one prompt to several workers**, use `fleet broadcast [--to w1,w2] [--wait SECS] --prompt-stdin` (all workers read the same file) instead of a loop: no `--to` means every tracked worker; a refusal (typed text, open dialog, unknown name) skips that worker only; `--wait` waits for all and prints each reply (exit 1 if any send failed, 4 if any blocked, 5 if any interrupted, 2 if any timed out). Same authority as `send`. A broadcast that starts a task carries the [end-of-task policy](#end-of-task-policy). Since every recipient reads the same file, broadcast only to workers in the same repo, or to workers whose repos share one policy.
+To send **one prompt to several workers**, use `fleet broadcast [--to w1,w2] [--wait SECS] --prompt-stdin` (every worker gets the same typed text) instead of a loop: no `--to` means every tracked worker; a refusal (typed text, open dialog, unknown name) skips that worker only; `--wait` waits for all and prints each reply (exit 1 if any send failed, 4 if any blocked, 5 if any interrupted, 2 if any timed out). Same authority as `send`. A broadcast that starts a task carries the [end-of-task policy](#end-of-task-policy). Since every recipient gets the same prompt, broadcast only to workers in the same repo, or to workers whose repos share one policy.
 
 To **steer mid-turn**, `fleet send --now` sends Ctrl+Enter: the worker drops the current turn and runs the new prompt. Plain `send` while busy queues the prompt. `fleet keys <worker> Escape` interrupts without a new prompt.
 

@@ -146,6 +146,17 @@ class Fleet(unittest.TestCase):
     def rec(self, pane):
         return st.Store.load(self.ctx.store.path(pane.id))
 
+    def rest_file(self, sent, command, rest):
+        """The path in `sent`, checked to be `command (also read <path> and follow it)` with `rest` in it."""
+        prefix, suffix = command + " (also read ", " and follow it)"
+        self.assertTrue(sent.startswith(prefix) and sent.endswith(suffix), sent)
+        path = sent[len(prefix):-len(suffix)]
+        self.assertEqual(os.path.dirname(path), os.path.join(self.dir, "prompts"))
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o644)
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), rest)
+        return path
+
     def run_cmd(self, *argv, ctx=None):
         ctx = ctx or self.ctx
         ctx.out.seek(0)
@@ -288,6 +299,27 @@ class Send(Fleet):
         self.assertEqual(c.submitted, [("hi", "enter")])
 
 
+class SlashCommand(unittest.TestCase):
+    """cli.slash_command: a prompt whose first line is a slash command, split into that line and the rest."""
+
+    def test_slash_commands(self):
+        for content, expected in (
+            ("/review", ("/review", "")),
+            ("/implement GitHub issue #62\n", ("/implement GitHub issue #62", "")),
+            ("/plugin:skill x", ("/plugin:skill x", "")),
+            ("/my_cmd-2", ("/my_cmd-2", "")),
+            ("\n\n  /implement #7  \n\n  \n", ("/implement #7", "")),  # blank lines and padding don't count
+            ("/implement #7\nPolicy:\n\n- open a PR\n", ("/implement #7", "Policy:\n\n- open a PR\n")),
+            ("\n/implement #7\n  \nPolicy: merge\n \n", ("/implement #7", "Policy: merge\n")),
+        ):
+            self.assertEqual(cli.slash_command(content), expected, content)
+
+    def test_not_slash_commands(self):
+        for content in ("/tmp/spec.md has the details", "Fix the bug", "# Task\n\nRebase.\n",
+                        "Run /implement #7", "/", "/ x", "/a.b", "\nFix it\n/implement #7\n"):
+            self.assertIsNone(cli.slash_command(content), content)
+
+
 class PromptStdin(Fleet):
     PROMPT = "# Task\n\nRebase on main.\nThen run the tests.\n"
 
@@ -339,6 +371,48 @@ class PromptStdin(Fleet):
             code, _, err = self.run_cmd(*argv)
             self.assertEqual((code, err), (1, "fleet: --prompt-stdin: stdin is empty; nothing to send\n"), argv)
         self.assertEqual(self.a.intents, [])
+
+    def test_slash_command_is_typed_as_is(self):
+        self.ctx.stdin = io.StringIO("/implement GitHub issue #62\n\n")
+        code, out, err = self.run_cmd("send", "--prompt-stdin", "alpha")
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(self.a.submitted, [("/implement GitHub issue #62", "enter")])
+        self.assertEqual(out, "sent to alpha (slash command): /implement GitHub issue #62\n")
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "prompts")))  # nothing else to read
+
+    def test_slash_command_with_more_lines(self):
+        self.ctx.stdin = io.StringIO("/implement GitHub issue #62\nPolicy:\n- open a PR\n")
+        code, out, err = self.run_cmd("send", "--prompt-stdin", "alpha")
+        self.assertEqual((code, err), (0, ""))
+        [(sent, _)] = self.a.submitted
+        path = self.rest_file(sent, "/implement GitHub issue #62", "Policy:\n- open a PR\n")
+        self.assertEqual(out, "sent to alpha (slash command): /implement GitHub issue #62 (also read %s and follow it)\n"
+                         % path)
+
+    def test_broadcast_types_one_slash_command_to_all(self):
+        self.ctx.stdin = io.StringIO("/implement #7\nPolicy: merge\n")
+        code, out, err = self.run_cmd("broadcast", "--prompt-stdin")
+        self.assertEqual((code, err, out), (0, "", "sent to alpha (slash command)\nsent to beta (slash command)\n"))
+        self.assertEqual(self.a.submitted, self.b.submitted)
+        self.rest_file(self.a.submitted[0][0], "/implement #7", "Policy: merge\n")
+        self.assertEqual(len(os.listdir(os.path.join(self.dir, "prompts"))), 1)
+
+    def test_prompt_file_slash_command(self):
+        pf = os.path.join(self.dir, "task.md")
+        content = "/implement #7\n\nPolicy: merge\n"
+        with open(pf, "w", encoding="utf-8") as f:
+            f.write(content)
+        code, out, err = self.run_cmd("send", "--prompt-file", pf, "alpha")
+        self.assertEqual((code, err), (0, ""))
+        path = self.rest_file(self.a.submitted[0][0], "/implement #7", "Policy: merge\n")
+        self.assertNotEqual(path, pf)
+        with open(pf, encoding="utf-8") as f:
+            self.assertEqual(f.read(), content)  # the user's file is left alone
+        with open(pf, "w", encoding="utf-8") as f:
+            f.write("/review\n")
+        code, out, err = self.run_cmd("broadcast", "--prompt-file", pf)
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(self.b.submitted, [("/review", "enter")])
 
     def test_terminal_stdin(self):
         tty = io.StringIO("")
@@ -782,6 +856,33 @@ class New(Fleet):
         self.assertEqual(sent, "Read %s and do what it says." % path)
         with open(path, encoding="utf-8") as f:
             self.assertEqual(f.read(), "line 1\nline 2\n")
+
+    def test_prompt_stdin_slash_command(self):
+        self.ctx.stdin = io.StringIO("/implement GitHub issue #62\n")
+        code, out, err = self.run_cmd("new", self.repo, "feat", "--prompt-stdin")
+        self.assertEqual((code, err), (0, ""), out)
+        pane = [p for p in self.tmux.panes_.values() if p.window == "feat"][0]
+        self.assertEqual(pane.submitted[1], ("/implement GitHub issue #62", "enter"))
+        self.assertIn("sent to feat (slash command): /implement GitHub issue #62\n", out)
+
+    def test_prompt_stdin_slash_command_with_more_lines(self):
+        self.ctx.stdin = io.StringIO("/implement GitHub issue #62\nPolicy: merge\n")
+        code, out, err = self.run_cmd("new", self.repo, "feat", "--prompt-stdin")
+        self.assertEqual((code, err), (0, ""), out)
+        pane = [p for p in self.tmux.panes_.values() if p.window == "feat"][0]
+        self.rest_file(pane.submitted[1][0], "/implement GitHub issue #62", "Policy: merge\n")
+
+    def test_unsent_prompt_hint_types_the_same_text(self):
+        def new_window(session, name, cwd):
+            p = self.tmux.add(session, name)
+            p.shown = fixture("trust_dialog.ansi")
+            return p.id
+        self.tmux.new_window = new_window
+        self.ctx.stdin = io.StringIO("/implement GitHub issue #62\n")
+        code, out, err = self.run_cmd("new", "--no-worktree", self.dir, "plain", "--prompt-stdin")
+        self.assertEqual(code, 3)
+        self.assertIn("prompt not sent; once the worker is ready run: fleet send plain '/implement GitHub issue #62'\n",
+                      err)
 
     def test_trust_dialog_exits_3(self):
         def new_window(session, name, cwd):
