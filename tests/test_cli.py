@@ -156,68 +156,9 @@ class Fleet(unittest.TestCase):
         return code, ctx.out.getvalue(), ctx.err.getvalue()
 
 
-class Session(Fleet):
-    def test_inside_the_fleet_session(self):
-        self.assertEqual(cli.session(self.ctx), "fleet")
-
-    def test_fleet_session_env_wins(self):
-        self.ctx.environ["FLEET_SESSION"] = "fleet-x"
-        self.assertEqual(cli.session(self.ctx), "fleet-x")
-
-    def test_only_fleet_session_from_outside(self):
-        del self.ctx.environ["TMUX"]
-        self.assertEqual(cli.session(self.ctx), "fleet")
-
-    def test_several_sessions(self):
-        self.ctx.environ["TMUX_PANE"] = "%9"  # in a non-fleet session
-        self.tmux.extra_sessions.append("fleet-two")
-        with self.assertRaisesRegex(FleetError, r"several fleet sessions running \(fleet fleet-two\)"):
-            cli.session(self.ctx)
-
-    def test_no_session(self):
-        tmux = FakeTmux(own_pane="")
-        tmux.add("work", "w", "%3")
-        ctx = make_ctx(tmux, self.dir, environ={"TMUX_PANE": "", "TMUX": ""})
-        with self.assertRaisesRegex(FleetError, "no fleet session running"):
-            cli.session(ctx)
-
-
-class Target(Fleet):
-    def test_worker_name(self):
-        self.assertEqual(cli.target(self.ctx, "alpha"), "%1")
-
-    def test_unknown_name(self):
-        with self.assertRaisesRegex(FleetError, "no worker 'gamma' in fleet session 'fleet'"):
-            cli.target(self.ctx, "gamma")
-
-    def test_empty_name(self):
-        with self.assertRaises(FleetError):
-            cli.target(self.ctx, "")
-
-    def test_own_pane_by_window_name(self):
-        with self.assertRaisesRegex(FleetError, "resolves to this pane"):
-            cli.target(self.ctx, "orch")
-
-    def test_own_pane_by_id(self):
-        with self.assertRaisesRegex(FleetError, "resolves to this pane"):
-            cli.target(self.ctx, "%0")
-
-    def test_orchestrator_from_outside_the_fleet(self):
-        # run from another terminal: %0 is not our pane, but it is still the orchestrator
-        self.ctx.environ["TMUX_PANE"] = "%9"
-        self.ctx.environ["FLEET_SESSION"] = "fleet"
-        self.tmux.own_pane = "%9"
-        with self.assertRaisesRegex(FleetError, "orchestrator's pane"):
-            cli.target(self.ctx, "orch")
-        with self.assertRaisesRegex(FleetError, "orchestrator's pane"):
-            cli.target(self.ctx, "%0")
-
-    def test_raw_pane_id(self):
-        self.assertEqual(cli.target(self.ctx, "%2"), "%2")
-
-    def test_raw_pane_id_of_another_session(self):
-        with self.assertRaisesRegex(FleetError, "no worker '%9' in fleet session 'fleet'"):
-            cli.target(self.ctx, "%9")
+class Targets(Fleet):
+    """End to end: commands resolve targets through the Roster (tests/test_roster.py has the rules),
+    and fleet never types into an orchestrator."""
 
     def test_orchestrator_of_another_fleet(self):
         # The live slip that shaped this rule: a test fleet (FLEET_SESSION=fleet-test) driven from a
@@ -228,29 +169,32 @@ class Target(Fleet):
         tmux.add("fleet-test", "orch", "%4", role="orch")
         tmux.add("fleet-test", "w1", "%5", fleet_name="w1")
         ctx = make_ctx(tmux, self.dir, environ={"TMUX_PANE": "%3", "FLEET_SESSION": "fleet-test"})
-        self.assertEqual(cli.target(ctx, "w1"), "%5")
-        for name in ("%0", "%3", "%4", "orch", "me"):
-            with self.assertRaises(FleetError, msg=name):
-                cli.target(ctx, name)
-        for argv in (["send", "%0", "hi"], ["keys", "%0", "Enter"], ["broadcast", "--to", "%0,orch,%3", "hi"]):
-            cli.run(ctx, argv)
+        for argv in (["send", "%0", "hi"], ["keys", "%0", "Enter"], ["broadcast", "--to", "%0,orch,%3,%4", "hi"],
+                     ["send", "me", "hi"], ["keys", "orch", "Enter"]):
+            self.assertNotEqual(cli.run(ctx, argv), 0, argv)
         self.assertEqual([c for c in tmux.calls if c and c[0] == "send-keys"], [])
+        self.assertEqual(cli.run(ctx, ["send", "w1", "hi"]), 0)
 
-    def test_unknown_pane_id(self):
-        with self.assertRaisesRegex(FleetError, "no worker '%77'"):
-            cli.target(self.ctx, "%77")
+    def test_split_window_sends_to_the_worker_pane(self):
+        self.tmux.add("fleet", "alpha", "%5", command="zsh")  # the user split alpha's window...
+        panes = self.tmux.panes_
+        self.tmux.panes_ = {"%5": panes.pop("%5"), **panes}  # ...and tmux lists the new pane first
+        code, _, err = self.run_cmd("send", "alpha", "hi")
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(self.a.submitted, [("hi", "enter")])
+        self.assertEqual(self.tmux.keys_sent_to("%5"), [])
 
-    def test_other_tmux_targets_are_not_resolved(self):
-        # tmux would resolve these (session prefix, window index, "{last}") to some pane, possibly ours
-        for name in ("fle", "fleet", "0", "fleet:0", "{last}", "=fleet:orch", "other"):
-            with self.assertRaises(FleetError, msg=name):
-                cli.target(self.ctx, name)
-
-    def test_no_session_and_unknown_name(self):
-        tmux = FakeTmux(own_pane="")
-        ctx = make_ctx(tmux, self.dir, environ={"TMUX_PANE": "", "TMUX": ""})
-        with self.assertRaisesRegex(FleetError, "no fleet session running"):
-            cli.target(ctx, "alpha")
+    def test_broadcast_discovers_the_session_once(self):
+        asked = []
+        for m in ("sessions", "session_of", "panes"):
+            real = getattr(self.tmux, m)
+            setattr(self.tmux, m, lambda *a, _m=m, _real=real: asked.append(_m) or _real(*a))
+        del self.ctx.environ["TMUX_PANE"]  # from outside: discovery lists the sessions
+        self.ctx.environ.pop("TMUX")
+        _, out, _ = self.run_cmd("broadcast", "--wait", "5", "go")
+        self.assertTrue(out.startswith("sent to alpha\nsent to beta\n"), out)
+        self.assertEqual(asked.count("sessions"), 1)
+        self.assertEqual(asked.count("panes"), 1)
 
     def test_no_command_types_into_the_orchestrator(self):
         for argv in (["send", "orch", "hi"], ["send", "%0", "hi"], ["keys", "orch", "Enter"],
@@ -601,8 +545,9 @@ class Status(Fleet):
         self.assertTrue(os.path.exists(self.ctx.store.path("%1")))
 
     def test_empty(self):
-        for p in ("%1", "%2"):
-            st.Store.remove(self.ctx.store.path(p))
+        for p in (self.a, self.b):  # both exited and were swept: their windows hold a shell
+            st.Store.remove(self.ctx.store.path(p.id))
+            p.command = "zsh"
         self.assertEqual(self.run_cmd("status")[1], "fleet session: fleet\n(no workers)\n")
 
     def test_age(self):
@@ -713,7 +658,8 @@ class Rm(Fleet):
         self.assertEqual(self.ctx.wt.removed[0][2], True)
 
     def test_orchestrator(self):
-        self.assertEqual(self.run_cmd("rm", "orch")[2], "fleet: refusing to remove the orchestrator\n")
+        self.assertEqual(self.run_cmd("rm", "orch")[2], "fleet: 'orch' is the orchestrator's pane, not a worker\n")
+        self.assertIn("%0", self.tmux.panes_)
 
 
 class New(Fleet):

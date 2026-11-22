@@ -95,7 +95,7 @@ class FakeTmux(Tmux):
         return self.panes_[pane].session
 
     def panes(self, session):
-        if session not in self.sessions():
+        if session not in FakeTmux.sessions(self):  # not self.sessions: tests count the CLI's calls
             raise FleetError("can't find session %s" % session)
         return [{"window_name": p.window, "pane_id": p.id, "pane_current_command": p.command,
                  "@fleet_name": p.fleet_name, "@fleet_role": p.role}

@@ -15,6 +15,7 @@ import time
 
 from . import args as A
 from . import lifecycle as lc
+from . import roster as R
 from . import screen as S
 from . import state as st
 from .errors import FleetError, FleetExit
@@ -113,61 +114,12 @@ class Ctx:
 
 # ---------- session and targets ----------
 
-def is_fleet_session(name):
-    return name == "fleet" or name.startswith("fleet-")
-
-
-def session(ctx):
-    """The fleet session this command acts on."""
-    s = ctx.environ.get("FLEET_SESSION", "")
-    if s:
-        return s
-    pane = ctx.environ.get("TMUX_PANE", "")
-    if ctx.environ.get("TMUX") and pane:
-        try:
-            cur = ctx.tmux.session_of(pane)
-        except FleetError:
-            cur = ""
-        if is_fleet_session(cur):
-            return cur
-    found = [x for x in ctx.tmux.sessions() if is_fleet_session(x)]
-    if not found:
-        raise FleetError("no fleet session running; start one with: fleet up [name]")
-    if len(found) > 1:
-        raise FleetError("several fleet sessions running (%s); set FLEET_SESSION=<session>" % " ".join(found))
-    return found[0]
-
-
-def target(ctx, name):
-    """Worker name (window name in the fleet session) -> pane id. A raw pane id ("%12") is accepted
-    too, but only for a pane of the fleet session. Never returns an empty id, the caller's own pane,
-    or an orchestrator's (any pane marked @fleet_role=orch)."""
-    if not name:
-        raise FleetError("no worker name given")
-    s = session(ctx)
+def roster(ctx, session=None):
+    """The Roster of the fleet session (found unless given), built once per command."""
+    s = session or R.find_session(ctx.environ, ctx.tmux.session_of, ctx.tmux.sessions)
     panes = ctx.tmux.panes(s)
-    match = [p for p in panes if p["window_name"] == name]
-    if not match and re.match(r"^%\d+$", name):
-        match = [p for p in panes if p["pane_id"] == name]
-    if not match or not match[0]["pane_id"]:
-        raise FleetError("no worker '%s' in fleet session '%s'" % (name, s))
-    pane, role = match[0]["pane_id"], match[0]["@fleet_role"]
-    own = ctx.environ.get("TMUX_PANE", "")
-    if own and pane == own:
-        raise FleetError("'%s' resolves to this pane (the orchestrator), not a worker" % name)
-    if role == "orch":
-        raise FleetError("'%s' is the orchestrator's pane, not a worker" % name)
-    return pane
-
-
-def tracked(ctx, name):
-    """(pane, state file path, record) of a worker that has hook state."""
-    pane = target(ctx, name)
-    path = ctx.store.path(pane)
-    rec = st.Store.load(path)
-    if rec is None:
-        raise FleetError("'%s' is not a tracked worker (no hook state)" % name)
-    return pane, path, rec
+    tracked = {p["pane_id"] for p in panes if p["pane_id"] and ctx.lifecycle.is_tracked(p["pane_id"])}
+    return R.Roster(s, panes, tracked, ctx.environ.get("TMUX_PANE", ""))
 
 
 def capture(ctx, pane):
@@ -210,21 +162,6 @@ def sweep(ctx):
             continue
         if live.get(rec.get("pane", ""), None) != rec.get("name"):
             st.Store.remove(f)
-
-
-def session_records(ctx, s):
-    ctx.store.ensure()
-    sweep(ctx)
-    res = []
-    for f in ctx.store.files():
-        rec = st.Store.load(f)
-        if rec is not None and rec.get("session") == s:
-            res.append((f, rec))
-    return res
-
-
-def worker_names(ctx):
-    return [rec.get("name", "") for _, rec in session_records(ctx, session(ctx)) if rec.get("name")]
 
 
 def style_window(ctx, target_):
@@ -387,12 +324,9 @@ def await_prompt(ctx, pane, name, dirname):
 def cmd_new(ctx, argv):
     o = A.parse_new(argv)
     name, src, pfile = o["name"], o["src"], o["prompt_file"]
-    if "/" in name:
-        raise FleetError("'%s' contains '/': worktrees live at <repo>/<branch>, so names must be flat" % name)
-    if name == "orch":
-        raise FleetError("'orch' is the orchestrator's window")
-    if re.match(r"^%\d+$", name) or name.startswith("-"):
-        raise FleetError("'%s' cannot be a worker name" % name)
+    ros = roster(ctx)
+    ros.check_new_name(name)
+    s = ros.session
     if pfile:
         pfile = prompt_path(pfile)
     if not os.path.isdir(src):
@@ -400,10 +334,6 @@ def cmd_new(ctx, argv):
     if o["prompt_stdin"]:
         pfile = stdin_prompt(ctx)  # read now: stdin is not there to read after a minute of wt hooks
     src = os.path.realpath(src)
-
-    s = session(ctx)
-    if any(p["window_name"] == name for p in ctx.tmux.panes(s)):
-        raise FleetError("a window named '%s' already runs in '%s'" % (name, s))
 
     repo = wt = ""
     if not o["worktree"]:
@@ -439,12 +369,13 @@ def cmd_new(ctx, argv):
     ctx.say("ready: worker '%s' in %s (mode %s). Attach: tmux attach -t %s, then select window '%s'"
             % (name, d, o["mode"], s, name))
     if pfile:
-        return send(ctx, name, read_prompt_file(pfile))
+        return send(ctx, roster(ctx, session=s).lookup(name), read_prompt_file(pfile))
     return 0
 
 
-def send(ctx, name, text, now=False, force=False):
-    pane = target(ctx, name)
+def send(ctx, w, text, now=False, force=False):
+    """Type `text` into the prompt box of `w` (a Roster handle) and submit it."""
+    pane, name = w.pane, w.name
     scr = capture(ctx, pane)
     if scr.has_dialog():
         ctx.say(*scr.tail(12))
@@ -522,16 +453,16 @@ def prompt_text(ctx, o):
 
 def cmd_send(ctx, argv):
     o = A.parse_send(argv)
-    return send(ctx, o["name"], prompt_text(ctx, o), now=o["now"], force=o["force"])
+    return send(ctx, roster(ctx).lookup(o["name"]), prompt_text(ctx, o), now=o["now"], force=o["force"])
 
 
 WAIT_CODES = {"finished": 0, "exited": 0, "idle": 0, "interrupted": 5, "blocked": 4}
 
 
-def wait(ctx, name, timeout):
+def wait(ctx, w, timeout):
     """0 when the turn after the last send finished (or the worker exited, or, never sent to, is
-    idle), 5 when that turn was interrupted, 4 when blocked, 2 on timeout."""
-    pane, _, _ = tracked(ctx, name)
+    idle), 5 when that turn was interrupted, 4 when blocked, 2 on timeout. `w`: a Roster handle."""
+    pane, name = R.require_worker(w).pane, w.name
     look, recheck = screen_classifier(ctx, pane)
     deadline = ctx.monotonic() + timeout
     while True:
@@ -553,40 +484,46 @@ def wait(ctx, name, timeout):
 
 def cmd_wait(ctx, argv):
     o = A.parse_wait(argv)
-    return wait(ctx, o["name"], o["timeout"])
+    return wait(ctx, roster(ctx).worker(o["name"]), o["timeout"])
 
 
 def cmd_broadcast(ctx, argv):
     o = A.parse_broadcast(argv)
-    workers = o["to"] or worker_names(ctx)
-    if not workers:
+    if not o["to"]:
+        ctx.store.ensure()
+        sweep(ctx)
+    ros = roster(ctx)  # one for every recipient: the session is discovered once
+    # (name to report, what to look up): every worker by pane id, so a renamed window still resolves
+    targets = [(n, n) for n in o["to"]] or [(h.name, h.pane) for h in ros.workers()]
+    if not targets:
         raise FleetError("no workers to send to")
     text = prompt_text(ctx, o)  # resolved once: with --prompt-stdin every recipient reads one file
     sent, rc = [], 0
-    for w in workers:
+    for name, query in targets:
         try:
-            send(ctx.quiet(), w, text, now=o["now"], force=o["force"])
+            h = ros.lookup(query)
+            send(ctx.quiet(), h, text, now=o["now"], force=o["force"])
         except FleetError as e:
             ctx.warn("fleet: %s" % e)
-            ctx.say("NOT sent to %s (reason above)" % w)
+            ctx.say("NOT sent to %s (reason above)" % name)
             rc = 1
         else:
-            sent.append(w)
-            ctx.say("sent to %s" % w)
+            sent.append((name, h))
+            ctx.say("sent to %s" % name)
     if o["wait"] is None:
         return rc
     # Workers run concurrently, so waiting on each in turn costs no more than the slowest.
     blocked = interrupted = timed_out = False
-    for w in sent:
+    for w, h in sent:
         q = ctx.quiet()
         try:
-            wr = wait(q, w, o["wait"])
+            wr = wait(q, h, o["wait"])
         except FleetError as e:
             ctx.warn("fleet: %s" % e)
             wr = 1
         if wr == 0:
             ctx.say("##### %s: %s" % (w, q.out.getvalue().strip()))  # finished, exited or idle
-            last(ctx, w, 1)
+            last(ctx, h, 1)
         elif wr == 4:
             ctx.say("##### %s: BLOCKED, see it with: fleet read %s" % (w, w))
             blocked = True
@@ -618,7 +555,7 @@ def broadcast_code(failed, blocked, timed_out, interrupted=False):
 
 def cmd_read(ctx, argv):
     o = A.parse_read(argv)
-    pane = target(ctx, o["name"])
+    pane = roster(ctx).lookup(o["name"]).pane
     text = ctx.tmux.capture(pane, scrollback=o["n"])
     for line in text.split("\n"):
         if line:
@@ -629,8 +566,11 @@ def cmd_read(ctx, argv):
 TRANSCRIPT_LAG = 2.0  # how long the transcript may trail the Stop hook
 
 
-def last(ctx, name, n):
-    _, _, rec = tracked(ctx, name)
+def last(ctx, w, n):
+    """The last n replies of worker `w` (a Roster handle)."""
+    rec = ctx.lifecycle.load(R.require_worker(w).pane)
+    if rec is None:
+        raise FleetError("'%s' is no longer tracked (its state file is gone)" % w.name)
     tp = rec.get("transcript_path") or ""
     if not tp or not os.path.isfile(tp):
         ctx.say(rec.get("last_message") or "(no reply yet)")
@@ -688,12 +628,12 @@ def transcript_replies(path):
 
 def cmd_last(ctx, argv):
     o = A.parse_last(argv)
-    return last(ctx, o["name"], o["n"])
+    return last(ctx, roster(ctx).worker(o["name"]), o["n"])
 
 
 def cmd_keys(ctx, argv):
     o = A.parse_keys(argv)
-    pane = target(ctx, o["name"])
+    pane = roster(ctx).lookup(o["name"]).pane
     ctx.tmux.send_keys(pane, *o["keys"])
     ctx.lifecycle.dialog_answered(pane)
     return 0
@@ -708,20 +648,14 @@ def age(seconds):
     return "%dh" % (d // 3600)
 
 
-def _is_claude_command(cmd):
-    return "claude" in cmd or re.match(r"^\d+\.\d+\.\d+$", cmd) is not None
-
-
 def cmd_status(ctx, argv):
     o = A.parse_status(argv)
-    s = session(ctx)
-    recs = []
-    for _, found in session_records(ctx, s):
-        rec = reconcile(ctx, found["pane"]) if found.get("pane") else found
-        if rec is not None:
-            recs.append(rec)
-    untracked = [p["window_name"] for p in ctx.tmux.panes(s)
-                 if not p["@fleet_name"] and not p["@fleet_role"] and _is_claude_command(p["pane_current_command"])]
+    ctx.store.ensure()
+    sweep(ctx)
+    ros = roster(ctx)
+    s = ros.session
+    recs = [r for r in (reconcile(ctx, w.pane) for w in ros.workers()) if r is not None]
+    untracked = [h.name for h in ros.untracked()]
     if o["json"]:
         ctx.say(json.dumps({"workers": recs, "untracked": untracked}, indent=2, ensure_ascii=False))
         return 0
@@ -746,11 +680,8 @@ def cmd_status(ctx, argv):
 def cmd_rm(ctx, argv):
     o = A.parse_rm(argv)
     name = o["name"]
-    if name == "orch":
-        raise FleetError("refusing to remove the orchestrator")
-    pane = target(ctx, name)
-    path = ctx.store.path(pane)
-    rec = st.Store.load(path) or {}
+    pane = roster(ctx).lookup(name).pane
+    rec = ctx.lifecycle.load(pane) or {}
     wt, repo, branch = rec.get("worktree") or "", rec.get("repo") or "", rec.get("branch") or ""
     if wt and os.path.isdir(wt) and not o["force"]:
         rc, porcelain = ctx.git.run(wt, "status", "--porcelain")
@@ -761,7 +692,7 @@ def cmd_rm(ctx, argv):
             ctx.say(*short.splitlines()[:20])
             raise FleetError("uncommitted changes in %s (above). Commit them, or re-run with --force to discard them." % wt)
     ctx.tmux.kill_window(pane)
-    st.Store.remove(path)
+    ctx.lifecycle.forget(pane)
     ctx.say("killed window '%s'" % name)
     if wt and os.path.isdir(wt):
         # wt remove runs the remove hooks; --no-delete-branch keeps the branch, --foreground so it is gone on return.

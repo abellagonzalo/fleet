@@ -58,6 +58,10 @@ class Lifecycle:
     def is_tracked(self, pane):
         return self.load(pane) is not None
 
+    def forget(self, pane):
+        """Drop the worker's record (`fleet rm`, once its window is gone)."""
+        st.Store.remove(self.path(pane))
+
     # ---- transitions ----
 
     def create(self, pane, **meta):
