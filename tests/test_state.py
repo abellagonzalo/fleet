@@ -1,4 +1,4 @@
-"""The state-file store and the hook."""
+"""The state-file store, and the hook as a thin adapter over the lifecycle."""
 
 import json
 import os
@@ -87,40 +87,12 @@ class HookTest(TempStore):
     def rec(self, pane="%7"):
         return st.Store.load(self.store.path(pane))
 
-    def test_transitions(self):
+    def test_event_reaches_the_lifecycle(self):
         self.put("%7")
-        cases = [("SessionStart", {}, "idle"), ("UserPromptSubmit", {"prompt": "hi"}, "busy"),
-                 ("PermissionRequest", {"tool_name": "Bash"}, "blocked"), ("PostToolUse", {}, "busy"),
-                 ("Stop", {"last_assistant_message": "ok"}, "idle"), ("SessionEnd", {}, "exited")]
-        for ev, payload, want in cases:
-            sets, _ = self.fire(ev, payload)
-            self.assertEqual(self.rec()["state"], want, ev)
-            self.assertEqual(self.rec()["event"], ev)
-            self.assertEqual(sets, [("%7", "finished" if ev == "Stop" else want)])
-
-    def test_fields(self):
-        self.put("%7")
-        self.fire("UserPromptSubmit", {"prompt": "x" * 300, "session_id": "s1", "transcript_path": "/t.jsonl",
-                                       "cwd": "/w", "other": 1})
-        r = self.rec()
-        self.assertEqual(r["prompt"], "x" * 200)
-        self.assertEqual((r["session_id"], r["transcript_path"], r["cwd"]), ("s1", "/t.jsonl", "/w"))
-        self.assertNotIn("other", r)
-        self.assertEqual(r["heard_at"], 500)
-
-    def test_permission_detail(self):
-        self.put("%7")
-        self.fire("PermissionRequest", {"tool_name": "AskUserQuestion"})
-        self.assertEqual(self.rec()["detail"], "question")
-        self.fire("PermissionRequest", {"tool_name": "Write"})
-        self.assertEqual(self.rec()["detail"], "permission: Write")
-        self.fire("PermissionRequest", {})
-        self.assertEqual(self.rec()["detail"], "permission: ?")
-
-    def test_stop_records_last_message_and_clears_detail(self):
-        self.put("%7", detail="permission: Bash")
-        self.fire("Stop", {"last_assistant_message": "all done"})
-        self.assertEqual((self.rec()["last_message"], self.rec()["detail"]), ("all done", ""))
+        sets, _ = self.fire("Stop", {"last_assistant_message": "ok"})
+        self.assertEqual((self.rec()["state"], self.rec()["outcome"], self.rec()["last_message"]),
+                         ("idle", "finished", "ok"))
+        self.assertEqual(sets, [("%7", "finished")])
 
     def test_notification_keeps_state_and_notifies_for_dialogs(self):
         self.put("%7", state="blocked", detail="question", name="feat-x")
