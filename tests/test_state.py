@@ -22,7 +22,8 @@ class TempStore(unittest.TestCase):
         shutil.rmtree(self.dir)
 
     def put(self, pane, **rec):
-        base = {"name": "w", "session": "fleet", "pane": pane, "state": "starting", "detail": "", "ts": 1}
+        base = {"name": "w", "session": "fleet", "pane": pane, "state": "starting", "outcome": "none",
+                "detail": "", "state_since": 1, "heard_at": 1, "seq": 0}
         base.update(rec)
         path = self.store.path(pane)
         st.Store.write(path, base)
@@ -90,12 +91,12 @@ class HookTest(TempStore):
         self.put("%7")
         cases = [("SessionStart", {}, "idle"), ("UserPromptSubmit", {"prompt": "hi"}, "busy"),
                  ("PermissionRequest", {"tool_name": "Bash"}, "blocked"), ("PostToolUse", {}, "busy"),
-                 ("Stop", {"last_assistant_message": "ok"}, "done"), ("SessionEnd", {}, "exited")]
+                 ("Stop", {"last_assistant_message": "ok"}, "idle"), ("SessionEnd", {}, "exited")]
         for ev, payload, want in cases:
             sets, _ = self.fire(ev, payload)
             self.assertEqual(self.rec()["state"], want, ev)
             self.assertEqual(self.rec()["event"], ev)
-            self.assertEqual(sets, [("%7", want)])
+            self.assertEqual(sets, [("%7", "finished" if ev == "Stop" else want)])
 
     def test_fields(self):
         self.put("%7")
@@ -105,7 +106,7 @@ class HookTest(TempStore):
         self.assertEqual(r["prompt"], "x" * 200)
         self.assertEqual((r["session_id"], r["transcript_path"], r["cwd"]), ("s1", "/t.jsonl", "/w"))
         self.assertNotIn("other", r)
-        self.assertEqual(r["ts"], 500)
+        self.assertEqual(r["heard_at"], 500)
 
     def test_permission_detail(self):
         self.put("%7")
@@ -148,7 +149,7 @@ class HookTest(TempStore):
     def test_bad_input_still_records_the_event(self):
         self.put("%7")
         self.fire("Stop", None, raw="not json")
-        self.assertEqual(self.rec()["state"], "done")
+        self.assertEqual(self.rec()["outcome"], "finished")
 
     def test_main_prints_nothing_and_exits_0(self):
         import subprocess
@@ -162,7 +163,7 @@ class HookTest(TempStore):
                                input=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                universal_newlines=True, env=env, timeout=10)
             self.assertEqual((p.returncode, p.stdout, p.stderr), (0, "", ""), ev)
-        self.assertEqual(self.rec()["state"], "done")
+        self.assertEqual(self.rec()["outcome"], "finished")
         # a state dir that cannot be written to: still silent, still 0
         env["FLEET_STATE_DIR"] = "/nonexistent/x"
         p = subprocess.run([sys.executable, script, "Stop"], input="{}", stdout=subprocess.PIPE,

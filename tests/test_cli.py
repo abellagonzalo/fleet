@@ -137,8 +137,9 @@ class Fleet(unittest.TestCase):
 
     def track(self, pane, **fields):
         rec = {"name": pane.window, "session": pane.session, "pane": pane.id, "dir": "/w", "repo": "",
-               "worktree": "", "branch": "", "mode": "manual", "state": "idle", "detail": "",
-               "ts": self.clock.now(), "created": self.clock.now()}
+               "worktree": "", "branch": "", "mode": "manual", "state": "idle", "outcome": "none",
+               "detail": "", "state_since": self.clock.now(), "heard_at": self.clock.now(),
+               "created": self.clock.now(), "seq": 0}
         rec.update(fields)
         st.Store.write(self.ctx.store.path(pane.id), rec)
 
@@ -286,8 +287,20 @@ class Send(Fleet):
         literals = [c for c in self.tmux.keys_sent_to("%1") if "-l" in c]
         self.assertEqual(len(literals), len("fix the bug"))
         r = self.rec(self.a)
-        self.assertEqual((r["state"], r["sent_at"]), ("busy", self.clock.now()))
+        self.assertEqual((r["state"], r["sent_seq"]), ("busy", r["seq"]))
         self.assertEqual(self.tmux.window_options[("%1", "@fleet_state")], "busy")
+
+    def test_prompt_is_recorded_before_it_is_submitted(self):
+        # the prompt's UserPromptSubmit can fire the moment Enter lands: it must order after the send
+        seen = []
+        send_keys = self.tmux.send_keys
+
+        def spy(pane, *keys, **kw):
+            seen.append(self.rec(self.a).get("sent_seq"))
+            return send_keys(pane, *keys, **kw)
+        self.tmux.send_keys = spy
+        self.run_cmd("send", "alpha", "go")
+        self.assertEqual(seen, [1])
 
     def test_now_sends_ctrl_enter(self):
         code, out, _ = self.run_cmd("send", "--now", "alpha", "stop that")
@@ -415,43 +428,47 @@ class PromptStdin(Fleet):
 
 
 class Wait(Fleet):
-    def test_done_after_send(self):
-        self.track(self.a, state="busy", sent_at=self.clock.now(), ts=self.clock.now())
+    def hook(self, pane, event, **payload):
+        self.ctx.lifecycle.hook_event(pane.id, event, payload)
+
+    def test_finished_after_send(self):
+        self.track(self.a, state="busy", sent_seq=1, seq=1)
+        self.a.screen = fixture("busy.ansi")
 
         def tick(t):
-            if t > self.clock.t - 1 and self.clock.now() >= 1_000_005:
-                st.Store.update(self.ctx.store.path("%1"), {"state": "done", "event": "Stop", "ts": self.clock.now()})
-        self.a.screen = fixture("busy.ansi")
+            if self.clock.now() >= 1_000_005 and self.rec(self.a)["state"] == "busy":
+                self.hook(self.a, "UserPromptSubmit", prompt="go")
+                self.hook(self.a, "Stop", last_assistant_message="ok")
+                self.a.screen = fixture("done.ansi")
         self.clock.on_sleep = tick
         code, out, _ = self.run_cmd("wait", "alpha", "60")
-        self.assertEqual((code, out), (0, "done\n"))
+        self.assertEqual((code, out), (0, "finished\n"))
 
-    def test_stale_done_from_the_previous_turn_is_ignored(self):
-        # The previous turn's Stop at t-10; we sent at t; the hook has not caught up yet.
-        now = self.clock.now()
-        self.track(self.a, state="done", event="Stop", ts=now - 10, sent_at=now)
+    def test_previous_turn_is_ignored(self):
+        # The previous turn ended (seq 1) before we sent (seq 2); the new prompt has not stopped yet.
+        self.track(self.a, state="busy", outcome="finished", ended_seq=1, sent_seq=2, seq=2)
         self.a.screen = fixture("busy.ansi")
         code, out, _ = self.run_cmd("wait", "alpha", "5")
         self.assertEqual((code, out), (2, "still busy after 5s\n"))
 
     def test_blocked(self):
-        self.track(self.a, state="blocked", detail="permission: Bash", ts=self.clock.now())
+        self.track(self.a, state="blocked", detail="permission: Bash")
         code, out, _ = self.run_cmd("wait", "alpha", "5")
         self.assertEqual((code, out), (4, "blocked: permission: Bash. See it with: fleet read alpha\n"))
 
     def test_busy_turns_blocked_from_the_screen(self):
-        self.track(self.a, state="busy", ts=self.clock.now() - 10)
+        self.track(self.a, state="busy", heard_at=self.clock.now() - 10)
         self.a.screen = fixture("permission_dialog.ansi")
         code, out, _ = self.run_cmd("wait", "alpha", "5")
         self.assertEqual((code, out), (4, "blocked: dialog on screen. See it with: fleet read alpha\n"))
         self.assertEqual(self.rec(self.a)["state"], "blocked")
 
     def test_interrupt_is_seen(self):
-        self.track(self.a, state="busy", ts=self.clock.now() - 10)
+        self.track(self.a, state="busy", heard_at=self.clock.now() - 10, sent_seq=1, submit_seq=2, seq=2)
         self.a.screen = fixture("interrupted.ansi")
         code, out, _ = self.run_cmd("wait", "alpha", "5")
-        self.assertEqual((code, out), (0, "idle\n"))
-        self.assertEqual(self.rec(self.a)["detail"], "interrupted")
+        self.assertEqual((code, out), (5, "interrupted\n"))
+        self.assertEqual(self.rec(self.a)["outcome"], "interrupted")
 
     def test_exited(self):
         self.track(self.a, state="exited")
@@ -463,7 +480,7 @@ class Wait(Fleet):
         self.assertEqual((code, err), (1, "fleet: 'manual' is not a tracked worker (no hook state)\n"))
 
     def test_timeout_is_wall_clock(self):
-        self.track(self.a, state="busy", ts=self.clock.now())
+        self.track(self.a, state="busy")
         self.a.screen = fixture("busy.ansi")
         start = self.clock.t
         code, _, _ = self.run_cmd("wait", "alpha", "30")
@@ -504,6 +521,8 @@ class Broadcast(Fleet):
         self.assertEqual(cli.broadcast_code(False, False, True), 2)
         self.assertEqual(cli.broadcast_code(False, True, True), 4)  # bash got 2 if the timeout came first
         self.assertEqual(cli.broadcast_code(True, True, True), 1)
+        self.assertEqual(cli.broadcast_code(False, False, True, True), 5)
+        self.assertEqual(cli.broadcast_code(False, True, False, True), 4)
 
     def test_wait_prints_replies_and_codes(self):
         tp = os.path.join(self.dir, "t.jsonl")
@@ -512,13 +531,14 @@ class Broadcast(Fleet):
         self.a.screen = fixture("busy.ansi")
         self.b.screen = fixture("busy.ansi")
 
+        life = self.ctx.lifecycle
+
         def tick(t):
-            if self.a.submitted and self.rec(self.a)["state"] != "done":
-                st.Store.update(self.ctx.store.path("%1"), {"state": "done", "event": "Stop",
-                                                             "ts": self.clock.now(), "transcript_path": tp})
+            if self.a.submitted and self.rec(self.a)["state"] != "idle":
+                life.hook_event("%1", "UserPromptSubmit", {"prompt": "rebase"})
+                life.hook_event("%1", "Stop", {"last_assistant_message": "rebased", "transcript_path": tp})
             if self.b.submitted and self.rec(self.b)["state"] != "blocked":
-                st.Store.update(self.ctx.store.path("%2"), {"state": "blocked", "detail": "question",
-                                                             "ts": self.clock.now()})
+                life.hook_event("%2", "PermissionRequest", {"tool_name": "AskUserQuestion"})
         self.a.screens = [box_screen()]
         self.b.screens = [box_screen()]
         self.a.screen = None
@@ -532,9 +552,10 @@ class Broadcast(Fleet):
 
 class Status(Fleet):
     def test_table(self):
-        self.track(self.a, state="done", ts=self.clock.now() - 125, last_message="all\n  good")
+        self.track(self.a, state="idle", outcome="finished", state_since=self.clock.now() - 125,
+                   last_message="all\n  good")
         self.track(self.b, state="blocked", detail="permission: Bash and a very long detail",
-                   ts=self.clock.now() - 1)
+                   state_since=self.clock.now() - 1)
         self.b.screen = fixture("permission_dialog.ansi")
         self.tmux.add("fleet", "byhand", "%6")  # a claude started by hand
         self.tmux.add("fleet", "sh", "%7", command="zsh")
@@ -543,7 +564,7 @@ class Status(Fleet):
         self.assertEqual(out.splitlines(), [
             "fleet session: fleet",
             "WORKER                   STATE    AGE   DETAIL                 LAST MESSAGE",
-            "alpha                    done     2m                           all good",
+            "alpha                    idle     2m                           all good",
             "beta                     blocked  1s    permission: Bash and a ",
             "byhand                   untracked",
         ])
@@ -555,7 +576,7 @@ class Status(Fleet):
         self.assertEqual(d["untracked"], [])
 
     def test_reconciles_and_sweeps(self):
-        self.track(self.a, state="busy", ts=self.clock.now() - 10)
+        self.track(self.a, state="busy", heard_at=self.clock.now() - 10)
         self.a.screen = fixture("question_cancelled.ansi")
         # beta's pane was reused by something that is not beta
         self.b.fleet_name = ""
@@ -564,7 +585,7 @@ class Status(Fleet):
         self.x.fleet_name = "shell"
         code, out, _ = self.run_cmd("status", "--json")
         d = json.loads(out)
-        self.assertEqual([(w["name"], w["state"], w["detail"]) for w in d["workers"]],
+        self.assertEqual([(w["name"], w["state"], w["outcome"]) for w in d["workers"]],
                          [("alpha", "idle", "interrupted")])
         self.assertFalse(os.path.exists(self.ctx.store.path("%2")))
         self.assertTrue(os.path.exists(self.ctx.store.path("%9")))
@@ -618,7 +639,7 @@ class LastAndRead(Fleet):
         entry = lambda t: json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": t}]}}) + "\n"
         with open(tp, "w") as f:
             f.write(entry("old"))
-        self.track(self.a, transcript_path=tp, event="Stop", last_message="new")
+        self.track(self.a, transcript_path=tp, outcome="finished", last_message="new")
 
         def flush(t):
             with open(tp, "a") as f:
@@ -631,7 +652,7 @@ class LastAndRead(Fleet):
         tp = os.path.join(self.dir, "t.jsonl")
         with open(tp, "w") as f:
             f.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "old"}]}}) + "\n")
-        self.track(self.a, transcript_path=tp, event="Stop", last_message="new")
+        self.track(self.a, transcript_path=tp, outcome="finished", last_message="new")
         self.assertEqual(self.run_cmd("last", "alpha", "2")[1], "old\n----\nnew\n----\n")
 
     def test_last_without_transcript(self):
