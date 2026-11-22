@@ -1,11 +1,5 @@
-"""Worker state files: <state dir>/workers/<pane id without %>.json, written by both the CLI and the
-hook. The JSON format is the bash version's, so a running fleet keeps working across the switch:
-
-    {name, session, pane, dir, repo, worktree, branch, mode, state, detail, ts, created,
-     event, session_id, transcript_path, cwd, prompt, last_message, sent_at}
-
-`state` is one of starting, idle, busy, blocked, done, exited. `ts` (epoch seconds, int) is the time of
-the last state change or hook event; `sent_at` the time of the last `fleet send`.
+"""Worker record storage: <state dir>/workers/<pane id without %>.json, written by both the CLI and
+the hook under a per-worker lock. What a record holds, and every change to it, is lifecycle.py's.
 """
 
 import errno
@@ -16,11 +10,6 @@ import time
 from contextlib import contextmanager
 
 DEFAULT_STATE_DIR = os.path.join(os.path.expanduser("~"), ".local", "state", "fleet")
-STALE = 3  # seconds before hook state may be corrected from the screen
-RECHECK_DELAY = 1.5  # a quiet screen is looked at again after this long before calling a turn over
-
-HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "PermissionRequest", "PostToolUse",
-               "Notification", "Stop", "SessionEnd")
 
 
 def state_dir(environ=None):
@@ -126,46 +115,3 @@ def locked(path, timeout):
                 fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
 
-
-# ---- the rules ----
-
-def reconcile_decision(state, ts, now, look, recheck):
-    """What a stale busy/blocked state should become, judged from the screen. Hooks miss interrupts
-    and cancelled dialogs, so once the state is STALE seconds old the screen wins.
-
-    look() -> 'dialog' | 'busy' | 'quiet' | None (screen unreadable); recheck() -> the same, after a
-    pause: one quiet screen can be a redraw between frames, so it takes two to call a turn over.
-    Returns (state, detail), or None to leave the record alone.
-    """
-    if state not in ("busy", "blocked"):
-        return None
-    if now - (ts or 0) < STALE:
-        return None
-    seen = look()
-    if seen is None:
-        return None
-    if seen == "dialog":
-        return None if state == "blocked" else ("blocked", "dialog on screen")
-    if seen == "busy":
-        return None if state == "busy" else ("busy", "")
-    seen = recheck()
-    if seen is None:
-        return None
-    if seen == "dialog":
-        return ("blocked", "dialog on screen")
-    if seen == "busy":
-        return ("busy", "")
-    return ("idle", "interrupted")
-
-
-def wait_state(rec):
-    """The state `fleet wait` acts on. A "done" counts only if its Stop hook fired at or after the last
-    send; an older one is the previous turn's (the hook state lags the send by a moment)."""
-    st = rec.get("state", "")
-    if st == "done":
-        if rec.get("event") != "Stop" or (rec.get("sent_at") or 0) > (rec.get("ts") or 0):
-            return "busy"
-    return st
-
-
-WAIT_FINAL = ("done", "idle", "exited")

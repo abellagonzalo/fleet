@@ -14,6 +14,7 @@ import tempfile
 import time
 
 from . import args as A
+from . import lifecycle as lc
 from . import screen as S
 from . import state as st
 from .errors import FleetError, FleetExit
@@ -81,6 +82,7 @@ class Ctx:
         self.isatty = isatty if isatty is not None else (lambda: sys.stdout.isatty())
         self.cwd = cwd or os.getcwd
         self.store = st.Store(st.state_dir(self.environ))
+        self.lifecycle = lc.Lifecycle(self.store, lambda: self.now(), glyph=self._glyph)
         self.delay = float(self.environ.get("FLEET_DELAY") or DELAY_DEFAULT)
 
     def quiet(self):
@@ -89,6 +91,9 @@ class Ctx:
         c.__dict__.update(self.__dict__)
         c.out = io.StringIO()
         return c
+
+    def _glyph(self, pane, value):
+        self.tmux.set_window_option(pane, "@fleet_state", value, check=False)
 
     def say(self, *lines):
         for l in lines:
@@ -166,23 +171,9 @@ def capture(ctx, pane):
 
 # ---------- state ----------
 
-def set_state(ctx, path, state, detail="", extra=None):
-    fields = {"state": state, "detail": detail, "ts": ctx.now()}
-    if extra:
-        fields.update(extra)
-    rec = st.Store.update(path, fields)
-    if rec and rec.get("pane"):
-        ctx.tmux.set_window_option(rec["pane"], "@fleet_state", state, check=False)
-    return rec
-
-
-def reconcile(ctx, path):
+def reconcile(ctx, pane):
     """Correct a stale busy/blocked state from the screen (hooks miss interrupts and cancelled
     dialogs). Returns the record as it stands afterwards."""
-    rec = st.Store.load(path)
-    if rec is None:
-        return None
-    pane = rec.get("pane", "")
 
     def look():
         try:
@@ -191,13 +182,10 @@ def reconcile(ctx, path):
             return None
 
     def recheck():
-        ctx.sleep(st.RECHECK_DELAY)
+        ctx.sleep(lc.RECHECK_DELAY)
         return look()
 
-    d = st.reconcile_decision(rec.get("state"), rec.get("ts"), ctx.now(), look, recheck)
-    if d is None:
-        return rec
-    return set_state(ctx, path, d[0], d[1]) or rec
+    return ctx.lifecycle.reconcile(pane, look, recheck)
 
 
 def sweep(ctx):
@@ -278,7 +266,7 @@ def hooks_settings(hook_path, state_root):
     """The --settings file content: every hook event runs fleet-hook, told where the state lives."""
     cmd = "FLEET_STATE_DIR=%s %s" % (shlex.quote(state_root), shlex.quote(hook_path))
     return {"hooks": {ev: [{"hooks": [{"type": "command", "command": "%s %s" % (cmd, ev)}]}]
-                      for ev in st.HOOK_EVENTS}}
+                      for ev in lc.EVENTS}}
 
 
 def resolve_worktree(ctx, src, name, base):
@@ -424,11 +412,8 @@ def cmd_new(ctx, argv):
         raise FleetError("tmux did not report the new window's pane id (got %r)" % pane)
     ctx.tmux.set_pane_option(pane, "@fleet_name", name)
     style_window(ctx, pane)
-    now = ctx.now()
-    st.Store.write(ctx.store.path(pane), {
-        "name": name, "session": s, "pane": pane, "dir": d, "repo": repo, "worktree": wt,
-        "branch": name if repo else "", "mode": o["mode"], "state": "starting", "detail": "",
-        "ts": now, "created": now})
+    ctx.lifecycle.create(pane, name=name, session=s, dir=d, repo=repo, worktree=wt,
+                         branch=name if repo else "", mode=o["mode"])
 
     cmd = ["claude", "/fleet-worker", "--name", name, "--permission-mode", o["mode"], "--settings", hooks] + o["extra"]
     ctx.tmux.send_literal(pane, _shell_line(cmd, ctx))
@@ -477,10 +462,8 @@ def send(ctx, name, text, now=False, force=False):
         ctx.tmux.send_literal(pane, CTRL_ENTER)
     else:
         ctx.tmux.send_keys(pane, "Enter")
-    path = ctx.store.path(pane)
-    if os.path.isfile(path):
-        # wait uses sent_at to ignore a Stop that belongs to an earlier turn
-        set_state(ctx, path, "busy", extra={"sent_at": ctx.now()})
+    if ctx.lifecycle.is_tracked(pane):
+        ctx.lifecycle.prompt_sent(pane)
     ctx.say("sent%s to %s: %s" % (" (now)" if now else "", name, text))
     return 0
 
@@ -535,11 +518,11 @@ def wait(ctx, name, timeout):
     pane, path, rec = tracked(ctx, name)
     deadline = ctx.monotonic() + timeout
     while True:
-        rec = reconcile(ctx, path)
+        rec = reconcile(ctx, pane)
         if rec is None:
             raise FleetError("'%s' is no longer tracked (its state file is gone)" % name)
-        s = st.wait_state(rec)
-        if s in st.WAIT_FINAL:
+        s = lc.wait_state(rec)
+        if s in lc.WAIT_FINAL:
             ctx.say(s)
             return 0
         if s == "blocked":
@@ -688,11 +671,7 @@ def cmd_keys(ctx, argv):
     o = A.parse_keys(argv)
     pane = target(ctx, o["name"])
     ctx.tmux.send_keys(pane, *o["keys"])
-    path = ctx.store.path(pane)
-    rec = st.Store.load(path)
-    # Answering a dialog: assume work resumes; reconcile corrects it from the screen if not.
-    if rec is not None and rec.get("state") == "blocked":
-        set_state(ctx, path, "busy")
+    ctx.lifecycle.dialog_answered(pane)
     return 0
 
 
@@ -713,8 +692,8 @@ def cmd_status(ctx, argv):
     o = A.parse_status(argv)
     s = session(ctx)
     recs = []
-    for f, _ in session_records(ctx, s):
-        rec = reconcile(ctx, f)
+    for _, found in session_records(ctx, s):
+        rec = reconcile(ctx, found["pane"]) if found.get("pane") else found
         if rec is not None:
             recs.append(rec)
     untracked = [p["window_name"] for p in ctx.tmux.panes(s)
