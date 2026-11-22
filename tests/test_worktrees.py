@@ -159,11 +159,82 @@ class Removal(Repo):
         self.git("-C", self.main, "worktree", "add", "--quiet", "-b", "wk", d)
         return d
 
-    def test_clean_worktree_is_removed_branch_kept(self):
+    def pushed_worktree(self):
+        d = self.worktree()
+        self.git("-C", d, "push", "--quiet", "origin", "wk")
+        return d
+
+    def on_origin(self, branch):
+        ref = "refs/heads/" + branch
+        return subprocess.run(["git", "-C", self.origin, "show-ref", "--verify", "--quiet", ref]).returncode == 0
+
+    def test_merged_branch_deleted_locally_and_on_origin(self):
+        d = self.pushed_worktree()
+        self.assertEqual(self.wts.remove(self.repo, d), ["branch wk deleted (merged)", "origin/wk deleted"])
+        self.assertEqual(self.wt.removed, [(self.main, d, False, "merged")])
+        self.assertFalse(self.on_origin("wk"))
+        self.assertEqual(self.warned, [])
+
+    def test_merged_branch_already_gone_on_origin(self):
+        d = self.worktree()
+        self.assertEqual(self.wts.remove(self.repo, d), ["branch wk deleted (merged)"])
+        self.assertEqual(self.warned, [])
+
+    def test_failed_remote_delete_is_only_warned(self):
+        d = self.pushed_worktree()
+        self.git("-C", self.main, "remote", "set-url", "--push", "origin", os.path.join(self.dir, "gone.git"))
+        self.assertEqual(self.wts.remove(self.repo, d), ["branch wk deleted (merged)"])
+        self.assertEqual(self.warned, ["warning: could not delete origin/wk; delete it with: git push origin --delete wk"])
+        self.assertTrue(self.on_origin("wk"))
+
+    def test_unreachable_origin_warns_twice_and_still_removes(self):
+        d = self.pushed_worktree()
+        self.git("-C", self.main, "remote", "set-url", "origin", os.path.join(self.dir, "gone.git"))
+        self.assertEqual(self.wts.remove(self.repo, d), ["branch wk deleted (merged)"])
+        self.assertEqual(self.warned, ["warning: git fetch failed; checking the merge against local refs",
+                                       "warning: could not delete origin/wk; delete it with: git push origin --delete wk"])
+
+    def test_unmerged_branch_kept_everywhere(self):
+        d = self.pushed_worktree()
+        self.wt.outcome = "retained_unmerged"
+        self.assertEqual(self.wts.remove(self.repo, d), ["branch wk kept: not merged (use -D to delete it)"])
+        self.assertTrue(self.on_origin("wk"))
+
+    def test_force_delete_keeps_origin(self):
+        d = self.pushed_worktree()
+        self.assertEqual(self.wts.remove(self.repo, d, branch="delete"),
+                         ["branch wk deleted (-D)", "origin/wk kept: -D deletes only the local branch"])
+        self.assertEqual(self.wt.removed, [(self.main, d, False, "delete")])
+        self.assertTrue(self.on_origin("wk"))
+
+    def test_force_delete_of_an_unpushed_branch(self):
+        d = self.worktree()
+        self.assertEqual(self.wts.remove(self.repo, d, branch="delete"), ["branch wk deleted (-D)"])
+
+    def test_force_delete_when_origin_cannot_be_asked(self):
+        d = self.pushed_worktree()
+        self.git("-C", self.main, "remote", "set-url", "origin", os.path.join(self.dir, "gone.git"))
+        self.assertEqual(self.wts.remove(self.repo, d, branch="delete"),
+                         ["branch wk deleted (-D)", "origin/wk kept: -D deletes only the local branch"])
+        self.assertEqual(self.warned, [])  # no fetch: -D needs no merge check
+
+    def test_keep_branch(self):
+        d = self.pushed_worktree()
+        self.assertEqual(self.wts.remove(self.repo, d, branch="keep"), ["branch wk kept (--keep-branch)"])
+        self.assertEqual(self.wt.removed, [(self.main, d, False, "keep")])
+        self.assertTrue(self.on_origin("wk"))
+
+    def test_branch_checked_out_elsewhere(self):
+        d = self.pushed_worktree()
+        self.wt.outcome, self.wt.checked_out_at = "not_attempted", "/x/other"
+        self.assertEqual(self.wts.remove(self.repo, d), ["branch wk kept: checked out in another worktree (/x/other)"])
+        self.assertTrue(self.on_origin("wk"))
+
+    def test_clean_worktree_is_removed(self):
         d = self.worktree()
         self.wts.check_removable(d)
-        self.assertTrue(self.wts.remove(self.repo, d))
-        self.assertEqual(self.wt.removed, [(self.main, d, False)])
+        self.assertEqual(self.wts.remove(self.repo, d), ["branch wk deleted (merged)"])
+        self.assertEqual(self.wt.removed, [(self.main, d, False, "merged")])
         self.assertEqual(self.said, [])
 
     def test_dirty_worktree_refused_with_its_changes(self):
@@ -195,18 +266,18 @@ class Removal(Repo):
     def test_forced_removal_of_a_dirty_worktree(self):
         d = self.worktree()
         open(os.path.join(d, "new.txt"), "w").close()
-        self.assertTrue(self.wts.remove(self.repo, d, force=True))
-        self.assertEqual(self.wt.removed, [(self.main, d, True)])
+        self.assertEqual(self.wts.remove(self.repo, d, force=True), ["branch wk deleted (merged)"])
+        self.assertEqual(self.wt.removed, [(self.main, d, True, "merged")])
 
     def test_gone_worktree_is_nothing_to_remove(self):
         d = os.path.join(self.repo, "gone")
         self.wts.check_removable(d)
-        self.assertFalse(self.wts.remove(self.repo, d))
+        self.assertIsNone(self.wts.remove(self.repo, d))
         self.assertEqual(self.wt.removed, [])
 
     def test_wt_remove_failure(self):
         d = self.worktree()
-        self.wt.remove = lambda repo, worktree, force=False: False
+        self.wt.remove_ok = False
         with self.assertRaises(FleetError) as e:
             self.wts.remove(self.repo, d)
         self.assertEqual(str(e.exception), "wt remove failed for %s" % d)

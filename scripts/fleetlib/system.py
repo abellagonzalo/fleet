@@ -195,7 +195,7 @@ class Git:
 
 
 class Wt:
-    """worktrunk. Hook and remove output goes to our stderr, as progress for the user."""
+    """worktrunk. Hook and remove progress goes to our stderr, for the user."""
 
     def available(self):
         from shutil import which
@@ -222,12 +222,26 @@ class Wt:
                  stdout=sys.stderr, stderr=None)
         return p.returncode == 0
 
-    def remove(self, repo, worktree, force=False):
-        import sys
-        argv = ["wt", "-C", repo, "remove", worktree, "--no-delete-branch", "--foreground", "--yes"]
+    def remove(self, repo, worktree, force=False, branch="merged"):
+        """Remove `worktree`; `force` discards its changes. `branch`: "merged" (worktrunk deletes it if
+        merged), "keep" or "delete" (delete even unmerged). Returns (ok, the worktree's entry of
+        `wt remove --format json`: branch, branch_outcome, branch_checked_out_at; {} if unreadable)."""
+        import json
+        argv = ["wt", "-C", repo, "remove", worktree, "--foreground", "--yes", "--format", "json"]
+        if branch == "keep":
+            argv.append("--no-delete-branch")
+        elif branch == "delete":
+            argv.append("--force-delete")
         if force:
             argv.append("--force")
-        return _run(argv, check=False, stdout=sys.stderr, stderr=None).returncode == 0
+        p = _run(argv, check=False, stdout=subprocess.PIPE, stderr=None)
+        try:
+            out = json.loads(p.stdout or "null")
+        except ValueError:
+            out = None
+        if isinstance(out, list):
+            out = next((e for e in out if isinstance(e, dict) and e.get("kind") == "worktree"), None)
+        return p.returncode == 0, out if isinstance(out, dict) else {}
 
 
 def notify(title, message):

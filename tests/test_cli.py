@@ -97,9 +97,13 @@ class Args(unittest.TestCase):
         self.assertEqual(A.parse_keys(["w", "Down", "Enter"]), {"name": "w", "keys": ["Down", "Enter"]})
         with self.assertRaises(A.UsageError):
             A.parse_keys(["w"])
-        self.assertEqual(A.parse_rm(["--force", "w"]), {"force": True, "name": "w"})
-        self.assertEqual(A.parse_rm(["w", "--force"]), {"force": True, "name": "w"})
-        for bad in ([], ["--force"], ["a", "b"], ["--zap", "a"]):
+        self.assertEqual(A.parse_rm(["--force", "w"]), {"force": True, "branch": "merged", "name": "w"})
+        self.assertEqual(A.parse_rm(["w", "--force"]), {"force": True, "branch": "merged", "name": "w"})
+        self.assertEqual(A.parse_rm(["w", "--keep-branch"]), {"force": False, "branch": "keep", "name": "w"})
+        for d in ("-D", "--force-delete"):
+            self.assertEqual(A.parse_rm([d, "--force", "w"]), {"force": True, "branch": "delete", "name": "w"})
+        for bad in ([], ["--force"], ["a", "b"], ["--zap", "a"], ["a", "-D", "--keep-branch"],
+                    ["a", "--keep-branch", "--force-delete"]):
             with self.assertRaises(A.UsageError, msg=bad):
                 A.parse_rm(bad)
 
@@ -739,9 +743,9 @@ class Rm(Fleet):
     def test_clean_worktree(self):
         code, out, _ = self.run_cmd("rm", "alpha")
         self.assertEqual(code, 0)
-        self.assertEqual(out, "killed window 'alpha'\nremoved worktree %s; branch alpha kept\n" % self.wt)
+        self.assertEqual(out, "killed window 'alpha'\nremoved worktree %s\nbranch alpha deleted (merged)\n" % self.wt)
         self.assertNotIn("%1", self.tmux.panes_)
-        self.assertEqual(self.wts.calls, [("check_removable", self.wt), ("remove", self.repo, self.wt, False)])
+        self.assertEqual(self.wts.calls, [("check_removable", self.wt), ("remove", self.repo, self.wt, False, "merged")])
         self.assertFalse(os.path.exists(self.ctx.store.path("%1")))
 
     def test_refused_worktree_keeps_the_window(self):
@@ -755,10 +759,25 @@ class Rm(Fleet):
     def test_force_skips_the_check(self):
         code, _, _ = self.run_cmd("rm", "--force", "alpha")
         self.assertEqual(code, 0)
-        self.assertEqual(self.wts.calls, [("remove", self.repo, self.wt, True)])
+        self.assertEqual(self.wts.calls, [("remove", self.repo, self.wt, True, "merged")])
+
+    def test_branch_flags_pass_through(self):
+        for flags, branch in ((["--keep-branch"], "keep"), (["-D"], "delete"), (["--force-delete", "--force"], "delete")):
+            self.a = self.tmux.add("fleet", "alpha", "%1", fleet_name="alpha")
+            self.track(self.a, repo=self.repo, worktree=self.wt, branch="alpha")
+            self.wts.calls = []
+            code, _, _ = self.run_cmd("rm", "alpha", *flags)
+            self.assertEqual(code, 0)
+            self.assertEqual(self.wts.calls[-1], ("remove", self.repo, self.wt, "--force" in flags, branch))
+
+    def test_keep_branch_with_force_delete_is_a_usage_error(self):
+        code, _, err = self.run_cmd("rm", "alpha", "--keep-branch", "-D")
+        self.assertEqual((code, err), (1, "fleet: --keep-branch and -D (--force-delete) contradict each other\n"))
+        self.assertIn("%1", self.tmux.panes_)
+        self.assertEqual(self.wts.calls, [])
 
     def test_worktree_already_gone(self):
-        self.wts.removed = False
+        self.wts.removed = None
         code, out, _ = self.run_cmd("rm", "alpha")
         self.assertEqual((code, out), (0, "killed window 'alpha'\n"))
 

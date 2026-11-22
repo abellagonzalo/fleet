@@ -208,6 +208,9 @@ class FakeWt:
         self.list_out = '{"items": []}'
         self.switch_result = (0, "{}")
         self.removed = []
+        self.outcome = "deleted"  # wt's branch_outcome for the next remove
+        self.checked_out_at = None
+        self.remove_ok = True
 
     def available(self):
         return True
@@ -223,9 +226,13 @@ class FakeWt:
         self.calls.append(("hook", worktree, name))
         return True
 
-    def remove(self, repo, worktree, force=False):
-        self.removed.append((repo, worktree, force))
-        return True
+    def remove(self, repo, worktree, force=False, branch="merged"):
+        """Records the call; (ok, what `wt remove --format json` reports for the worktree)."""
+        self.removed.append((repo, worktree, force, branch))
+        outcome = "not_attempted" if branch == "keep" and self.outcome == "deleted" else self.outcome
+        name = os.path.basename(worktree)
+        return self.remove_ok, {"kind": "worktree", "branch": name, "path": worktree,
+                                "branch_outcome": outcome, "branch_checked_out_at": self.checked_out_at}
 
 
 class FakeWorktrees:
@@ -235,7 +242,7 @@ class FakeWorktrees:
         self.calls = []
         self.ensured = None  # (dir, repo) that ensure returns
         self.errors = {}  # method name -> FleetError it raises
-        self.removed = True  # what remove returns (False: the worktree was already gone)
+        self.removed = ["branch alpha deleted (merged)"]  # what remove returns (None: already gone)
 
     def _call(self, name, *args):
         self.calls.append((name,) + args)
@@ -249,8 +256,8 @@ class FakeWorktrees:
     def check_removable(self, worktree):
         self._call("check_removable", worktree)
 
-    def remove(self, repo, worktree, force=False):
-        self._call("remove", repo, worktree, force)
+    def remove(self, repo, worktree, force=False, branch="merged"):
+        self._call("remove", repo, worktree, force, branch)
         return self.removed
 
 

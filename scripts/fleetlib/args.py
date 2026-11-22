@@ -206,10 +206,16 @@ def parse_keys(args):
 
 
 def parse_rm(args):
-    o = {"force": False, "name": ""}
+    usage = "usage: fleet rm <worker> [--force] [--keep-branch | -D/--force-delete]"
+    o = {"force": False, "branch": "merged", "name": ""}
+    keep = delete = False
     for a in args:
         if a == "--force":
             o["force"] = True
+        elif a == "--keep-branch":
+            keep = True
+        elif a in ("-D", "--force-delete"):
+            delete = True
         elif a.startswith("-"):
             raise UsageError("unknown option %s" % a)
         elif o["name"]:
@@ -217,5 +223,8 @@ def parse_rm(args):
         else:
             o["name"] = a
     if not o["name"]:
-        raise UsageError("usage: fleet rm <worker> [--force]")
+        raise UsageError(usage)
+    if keep and delete:
+        raise UsageError("--keep-branch and -D (--force-delete) contradict each other")
+    o["branch"] = "keep" if keep else "delete" if delete else "merged"
     return o

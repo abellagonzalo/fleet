@@ -14,6 +14,8 @@ Your working directory is your worktree, and your branch is yours alone. Make ev
 
 The orchestrator owns the fleet. Leave the `fleet` CLI and the tmux session to it, and reach the user through your replies and dialogs.
 
+Cleanup is the orchestrator's too: never delete your own worktree or branch, and never write git cleanup commands (`git worktree remove`, `git branch -D`) for someone else to run. `fleet rm` removes your window and worktree, and your branch once it is merged. Deleting the remote branch as part of merging, when the end-of-task policy says so, is fine.
+
 ## The hand-off
 
 Every turn ends with a **hand-off**: the reply the orchestrator reads with `fleet last` and relays to the user, often without your screen. `fleet status` shows only its first 80 characters, so the first line is the **headline**:
@@ -24,7 +26,7 @@ Every turn ends with a **hand-off**: the reply the orchestrator reads with `flee
 
 Keep the headline under 80 characters. Below it, write what the user needs to act on: what you changed (files, commits), what you verified and how, and what is left. The hand-off is self-contained: it names files and commands outright, so it reads correctly when relayed alone.
 
-Before a `Done:`, follow the end-of-task policy in the task prompt: what done means, who merges, and the verification gate. If the prompt gives none, follow the `## Fleet` section in the repo's `CLAUDE.md` or `AGENTS.md`.
+Before a `Done:`, follow the end-of-task policy in the task prompt: what done means, who merges, and the verification gate. If the prompt gives none, follow the `## Fleet` section in the repo's `CLAUDE.md` or `AGENTS.md`. Once your work is merged, say so in the hand-off and that you are ready for `fleet rm`.
 
 ## Asking
 

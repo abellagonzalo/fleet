@@ -60,8 +60,12 @@ fleet wait <worker> [timeout_s]                block until the turn after the la
 fleet last <worker> [n]                        last n assistant replies from the transcript (default 1)
 fleet read <worker> [lines]                    the screen plus <lines> of scrollback (default 60)
 fleet keys <worker> <tmux-key>...              raw keys for dialogs: Enter, Escape, Up, Down, BTab, 1, 2...
-fleet rm <worker> [--force]                    kill the window; remove its worktree if clean (--force discards
-                                               changes); the branch is always kept
+fleet rm <worker> [--force] [--keep-branch | -D]
+                                               kill the window; remove its worktree if clean (--force discards
+                                               changes). Its branch goes, locally and on origin, when worktrunk sees
+                                               it merged into the default branch (squash and rebase merges count);
+                                               else it stays. --keep-branch: keep it anyway. -D (--force-delete):
+                                               delete it even unmerged, locally only (origin's keeps any open PR)
 Workers are addressed by window name. Session: $FLEET_SESSION, else the fleet session you are in, else the only one.
 """
 
@@ -686,14 +690,16 @@ def cmd_rm(ctx, argv):
     name = o["name"]
     pane = roster(ctx).lookup(name).pane
     rec = ctx.lifecycle.load(pane) or {}
-    wt, repo, branch = rec.get("worktree") or "", rec.get("repo") or "", rec.get("branch") or ""
+    wt, repo = rec.get("worktree") or "", rec.get("repo") or ""
     if wt and not o["force"]:
         ctx.worktrees.check_removable(wt)
     ctx.tmux.kill_window(pane)
     ctx.lifecycle.forget(pane)
     ctx.say("killed window '%s'" % name)
-    if wt and ctx.worktrees.remove(repo, wt, force=o["force"]):
-        ctx.say("removed worktree %s; branch %s kept" % (wt, branch))
+    if wt:
+        lines = ctx.worktrees.remove(repo, wt, force=o["force"], branch=o["branch"])
+        if lines is not None:
+            ctx.say("removed worktree %s" % wt, *lines)
     return 0
 
 

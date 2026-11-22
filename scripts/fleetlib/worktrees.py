@@ -90,15 +90,56 @@ class Worktrees:
             raise FleetError("uncommitted changes in %s (above). Commit them, or re-run with --force to "
                              "discard them." % worktree)
 
-    def remove(self, repo, worktree, force=False):
-        """Remove `worktree` of `repo`, keeping its branch; `force` discards its changes. False when
-        it was already gone."""
+    def remove(self, repo, worktree, force=False, branch="merged"):
+        """Remove `worktree` of `repo`; `force` discards its changes. `branch` says what happens to
+        its branch: "merged" deletes it (and origin's) when worktrunk sees it merged into the default
+        branch, squash and rebase merges included; "keep" keeps it; "delete" deletes it locally even
+        unmerged, keeping origin's (deleting that could close an open PR).
+        Returns the lines reporting the branch's fate, or None when the worktree was already gone."""
         if not os.path.isdir(worktree):
-            return False
-        # wt remove runs the remove hooks; it keeps the branch and returns once the worktree is gone.
-        if not self.wt.remove(main_checkout(repo), worktree, force=force):
+            return None
+        main = main_checkout(repo)
+        if branch == "merged" and not self.git.ok(main, "fetch", "--quiet", "origin"):
+            # worktrunk's merge check reads origin/<default>: stale, a fresh merge looks unmerged
+            self.warn("warning: git fetch failed; checking the merge against local refs")
+        # wt remove runs the remove hooks and returns once the worktree is gone.
+        ok, res = self.wt.remove(main, worktree, force=force, branch=branch)
+        if not ok:
             raise FleetError("wt remove failed for %s" % worktree)
-        return True
+        name = res.get("branch") or ""
+        if not name:
+            return []
+        outcome = res.get("branch_outcome")
+        if outcome == "deleted":
+            if branch == "delete":
+                lines = ["branch %s deleted (-D)" % name]
+                if self._on_origin(main, name) is not False:  # there, or can't tell
+                    lines.append("origin/%s kept: -D deletes only the local branch" % name)
+                return lines
+            return ["branch %s deleted (merged)" % name] + self._delete_on_origin(main, name)
+        if res.get("branch_checked_out_at") or outcome == "retained_checked_out":
+            where = res.get("branch_checked_out_at")
+            return ["branch %s kept: checked out in another worktree%s" % (name, " (%s)" % where if where else "")]
+        if branch == "keep":
+            return ["branch %s kept (--keep-branch)" % name]
+        reason = _KEPT_BECAUSE.get(outcome, "wt reported %s" % (outcome or "nothing"))
+        return ["branch %s kept: %s" % (name, reason)]
+
+    def _on_origin(self, main, name):
+        """Whether origin has branch `name`; None when origin can't be asked."""
+        rc, _ = self.git.run(main, "ls-remote", "--exit-code", "--heads", "origin", "refs/heads/" + name)
+        return True if rc == 0 else False if rc == 2 else None
+
+    def _delete_on_origin(self, main, name):
+        """Delete origin's `name`, once its merge made the local one go. Lines to report; a failure
+        is only warned about, since the worktree is gone by now."""
+        there = self._on_origin(main, name)
+        if there is False:
+            return []
+        if there and self.git.ok(main, "push", "--quiet", "origin", "--delete", name):
+            return ["origin/%s deleted" % name]
+        self.warn("warning: could not delete origin/%s; delete it with: git push origin --delete %s" % (name, name))
+        return []
 
     def _has_ref(self, main, ref):
         return self.git.ok(main, "show-ref", "--verify", "--quiet", ref)
@@ -111,6 +152,15 @@ class Worktrees:
             if self.git.ok(main, "rev-parse", "--verify", "--quiet", cand):
                 return cand
         raise FleetError("cannot find origin's default branch; pass --base REF")
+
+
+# Why worktrunk kept a branch, by its `wt remove --format json` branch_outcome.
+_KEPT_BECAUSE = {
+    "retained_unmerged": "not merged (use -D to delete it)",
+    "retained_raced": "it moved during the removal",
+    "retained_failed": "deleting it failed",
+    "not_attempted": "wt did not try to delete it",
+}
 
 
 def _wt_path_of(list_json, branch):

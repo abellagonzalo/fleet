@@ -47,7 +47,7 @@ also run them yourself from any shell:
     fleet status             # state, age and last reply of every worker
     fleet wait PROJ-123      # block until it finishes or needs you
     fleet last PROJ-123      # its last reply
-    fleet rm PROJ-123        # close the window, remove the worktree if clean; the branch stays
+    fleet rm PROJ-123        # close the window, remove the worktree if clean, delete the branch if merged
 
 `fleet help` lists every command and flag.
 
@@ -126,7 +126,7 @@ many workers, and `send --now` interrupts a running turn.
     from the screen), and what `wait` and `status` see.
   - `state.py`: storage for the worker records.
   - `worktrees.py`: the `<repo>/main` layout rule, find-or-create a worktree for a branch (for
-    `new`), and removing one only when it is clean (for `rm`).
+    `new`), and removing one only when it is clean, with its branch once merged (for `rm`).
   - `system.py`: the only place that runs tmux, git or wt. A pane's keyboard and screen are a
     `Terminal` (type, submit, press, screen, scrollback); its tmux adapter owns key encoding,
     typing pace and the guards that keep keys off the orchestrator's pane and your own.
