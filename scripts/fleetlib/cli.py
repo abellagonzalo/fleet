@@ -578,13 +578,14 @@ def cmd_broadcast(ctx, argv):
     # Workers run concurrently, so waiting on each in turn costs no more than the slowest.
     blocked = interrupted = timed_out = False
     for w in sent:
+        q = ctx.quiet()
         try:
-            wr = wait(ctx.quiet(), w, o["wait"])
+            wr = wait(q, w, o["wait"])
         except FleetError as e:
             ctx.warn("fleet: %s" % e)
             wr = 1
         if wr == 0:
-            ctx.say("##### %s: done" % w)
+            ctx.say("##### %s: %s" % (w, q.out.getvalue().strip()))  # finished, exited or idle
             last(ctx, w, 1)
         elif wr == 4:
             ctx.say("##### %s: BLOCKED, see it with: fleet read %s" % (w, w))
