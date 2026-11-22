@@ -563,9 +563,9 @@ class Status(Fleet):
         self.assertEqual(code, 0)
         self.assertEqual(out.splitlines(), [
             "fleet session: fleet",
-            "WORKER                   STATE    AGE   DETAIL                 LAST MESSAGE",
-            "alpha                    idle     2m                           all good",
-            "beta                     blocked  1s    permission: Bash and a ",
+            "WORKER                   STATE    OUTCOME     AGE   DETAIL                 LAST MESSAGE",
+            "alpha                    idle     finished    2m                           all good",
+            "beta                     blocked              1s    permission: Bash and a ",
             "byhand                   untracked",
         ])
 
@@ -573,6 +573,7 @@ class Status(Fleet):
         code, out, _ = self.run_cmd("status", "--json")
         d = json.loads(out)
         self.assertEqual([w["name"] for w in d["workers"]], ["alpha", "beta"])
+        self.assertEqual([w["outcome"] for w in d["workers"]], ["none", "none"])
         self.assertEqual(d["untracked"], [])
 
     def test_reconciles_and_sweeps(self):
@@ -602,6 +603,17 @@ class Status(Fleet):
 
     def test_age(self):
         self.assertEqual([cli.age(s) for s in (0, 59, 60, 3599, 3600, -5)], ["0s", "59s", "1m", "59m", "1h", "0s"])
+
+
+class Glyph(Fleet):
+    def test_status_bar_shows_finished_and_interrupted(self):
+        win = self.tmux.window_options
+        cli.style_window(self.ctx, "%1")
+        fmt = win[("%1", "window-status-format")]
+        self.assertIn("#{==:#{@fleet_state},finished},#[fg=green]✓", fmt)
+        self.assertIn("#{==:#{@fleet_state},interrupted},#[fg=yellow]↯", fmt)
+        self.assertIn("#{==:#{@fleet_state},blocked},#[fg=red]⚠", fmt)
+        self.assertIn("#{==:#{@fleet_state},busy},⋯", fmt)
 
 
 class Keys(Fleet):
