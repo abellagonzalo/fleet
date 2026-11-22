@@ -5,11 +5,18 @@ checkout; worker worktrees sit beside it, where worktrunk's template puts them),
 worktree for a branch, and removes a worktree only when that loses nothing.
 
 Dependencies: a git runner (system.Git: run/ok/out) and the wt adapter (system.Wt). Progress goes
-to `say`, warnings to `warn` (callables taking lines as arguments, like Ctx.say).
+to `say`, warnings to `warn` (callables taking lines as arguments, like Ctx.say); hook output goes
+to the terminal as is, or to `progress` (a callable taking one line) when given.
+
+Several worktrees of one repo may be ensured at once from threads (`fleet new` with several
+branches): the caller fetches once with fetch(), each thread uses its own labelled() copy, and
+`wt switch` runs one at a time, since concurrent branch creation races on the repo's config and ref
+locks. The hooks, the slow part, run concurrently.
 """
 
 import json
 import os
+import threading
 
 from .errors import FleetError
 
@@ -20,11 +27,33 @@ def main_checkout(repo):
 
 
 class Worktrees:
-    def __init__(self, git, wt, say, warn):
+    def __init__(self, git, wt, say, warn, progress=None, switch_lock=None):
         self.git = git
         self.wt = wt
         self.say = say
         self.warn = warn
+        self.progress = progress
+        self.switch_lock = switch_lock or threading.Lock()
+
+    def labelled(self, label):
+        """The same Worktrees with every line it prints, hook output included, prefixed by
+        `[label] `, so the output of worktrees made at the same time can be told apart."""
+        tag = "[%s] " % label
+        return Worktrees(self.git, self.wt,
+                         say=lambda *lines: self.say(*(tag + l for l in lines)),
+                         warn=lambda *lines: self.warn(*(tag + l for l in lines)),
+                         progress=lambda line: self.warn(tag + line), switch_lock=self.switch_lock)
+
+    def check_branch(self, branch):
+        if not self.git.ok(".", "check-ref-format", "--branch", branch):
+            raise FleetError("'%s' is not a valid branch name" % branch)
+
+    def fetch(self, src):
+        """Fetch origin for the repo of `src`; a failure is only warned about. Returns the repo."""
+        repo = self.locate(src)
+        if not self.git.ok(main_checkout(repo), "fetch", "--quiet", "origin"):
+            self.warn("warning: git fetch failed; using local refs")
+        return repo
 
     def locate(self, src):
         """The repo of `src`, which is <repo> or <repo>/main."""
@@ -35,11 +64,11 @@ class Worktrees:
         raise FleetError("%s does not follow <repo>/main (no git checkout at <repo>/main). "
                          "Pass --no-worktree to run there without a worktree." % src)
 
-    def ensure(self, src, branch, base=None):
+    def ensure(self, src, branch, base=None, fetch=True):
         """Find or make the worktree for `branch` of the repo at `src` (<repo> or <repo>/main), from
-        `base` (default: origin's default branch) when the branch is new. Returns (dir, repo)."""
-        if not self.git.ok(".", "check-ref-format", "--branch", branch):
-            raise FleetError("'%s' is not a valid branch name" % branch)
+        `base` (default: origin's default branch) when the branch is new. Returns (dir, repo).
+        fetch=False: the caller has fetched origin already (see fetch)."""
+        self.check_branch(branch)
         repo = self.locate(src)
         main = main_checkout(repo)
         # Worktrees go through worktrunk (wt): its worktree-path template decides where they live,
@@ -50,8 +79,8 @@ class Worktrees:
         if existing:
             self.say("reusing worktree %s" % existing)
             return existing, repo
-        if not self.git.ok(main, "fetch", "--quiet", "origin"):
-            self.warn("warning: git fetch failed; using local refs")
+        if fetch:
+            self.fetch(repo)
         create, how = False, ""
         if self._has_ref(main, "refs/heads/" + branch):
             how = "from existing branch %s" % branch
@@ -63,7 +92,8 @@ class Worktrees:
             create, how = True, "on new branch %s from %s" % (branch, base)
         # --no-hooks, then run them here: wt switch would start post-start hooks in the background,
         # and claude must not start (and spawn its MCP servers) before they finish.
-        rc, out = self.wt.switch(main, branch, create=create, base=base)
+        with self.switch_lock:
+            rc, out = self.wt.switch(main, branch, create=create, base=base)
         if rc != 0:
             raise FleetError("wt switch failed for %s" % branch)
         d = _switch_path(out)
@@ -72,7 +102,7 @@ class Worktrees:
         self.say("worktree %s %s" % (d, how))
         for h in ("pre-start", "post-start", "post-switch"):
             self.say("running wt %s hooks..." % h)
-            if not self.wt.hook(d, h):
+            if not self.wt.hook(d, h, out=self.progress):
                 self.warn("warning: wt %s hooks failed in %s" % (h, d))
         return d, repo
 

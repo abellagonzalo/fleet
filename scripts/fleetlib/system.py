@@ -216,10 +216,21 @@ class Wt:
         p = _run(argv, check=False, stderr=None)
         return p.returncode, p.stdout
 
-    def hook(self, worktree, name):
+    def hook(self, worktree, name, out=None):
+        """Run the `name` hooks of `worktree`; their output goes to our stderr, or line by line to
+        `out` when given. Returns whether they succeeded."""
         import sys
-        p = _run(["wt", "-C", worktree, "hook", name, "--yes", "--foreground"], check=False,
-                 stdout=sys.stderr, stderr=None)
+        argv = ["wt", "-C", worktree, "hook", name, "--yes", "--foreground"]
+        if out is None:
+            return _run(argv, check=False, stdout=sys.stderr, stderr=None).returncode == 0
+        try:
+            p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT, universal_newlines=True, errors="replace")
+        except FileNotFoundError:
+            raise FleetError("wt not found")
+        with p:
+            for line in p.stdout:
+                out(line.rstrip("\n"))
         return p.returncode == 0
 
     def remove(self, repo, worktree, force=False, branch="merged"):

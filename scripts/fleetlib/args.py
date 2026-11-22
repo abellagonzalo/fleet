@@ -51,12 +51,13 @@ def parse_up(args):
     return o
 
 
-NEW_USAGE = ("usage: fleet new <repo|repo/main> <branch> [--no-worktree] [--base REF] [--mode M] "
+NEW_USAGE = ("usage: fleet new <repo|repo/main> <branch> [<branch> ...] [--no-worktree] [--base REF] [--mode M] "
              "[--prompt-file P | --prompt-stdin] [-- claude args]")
 
 
 def parse_new(args):
-    o = {"src": "", "name": "", "worktree": True, "base": "", "mode": "auto", "prompt_file": "",
+    """One worker per name in o["names"]; with several, no first prompt and no --no-worktree."""
+    o = {"src": "", "names": [], "worktree": True, "base": "", "mode": "auto", "prompt_file": "",
          "prompt_stdin": False, "extra": []}
     i = 0
     while i < len(args):
@@ -75,17 +76,24 @@ def parse_new(args):
             raise UsageError("unknown option %s" % a)
         elif not o["src"]:
             o["src"] = a
-        elif not o["name"]:
-            o["name"] = a
         else:
-            raise UsageError("unexpected argument %s" % a)
+            o["names"].append(a)
         i += 1
-    if not o["src"] or not o["name"]:
+    if not o["src"] or not o["names"]:
         raise UsageError(NEW_USAGE)
     if not o["mode"]:
         raise UsageError("--mode needs a value")
     if o["prompt_stdin"] and o["prompt_file"]:
         raise UsageError("use --prompt-file or --prompt-stdin, not both")
+    if len(o["names"]) > 1:
+        if o["prompt_stdin"] or o["prompt_file"]:
+            raise UsageError("no first prompt with several branches: once the workers are ready, send each "
+                             "worker its first prompt with fleet send")
+        if not o["worktree"]:
+            raise UsageError("--no-worktree takes one worker: several workers in one directory is not supported")
+        for n in o["names"]:
+            if o["names"].count(n) > 1:
+                raise UsageError("'%s' is given twice" % n)
     return o
 
 

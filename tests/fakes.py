@@ -4,6 +4,7 @@ import io
 import os
 import re
 import sys
+import threading
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "scripts"))
@@ -124,15 +125,17 @@ class FakeTmux:
         self.extra_sessions = []
         self.next_id = 50
         self.server_up = True
+        self.lock = threading.Lock()  # `fleet new` with several branches opens windows from threads
 
     # ---- setup ----
     def add(self, session, window, pane_id=None, **kw):
         """A pane; role="orch" marks an orchestrator."""
-        if pane_id is None:
-            pane_id = "%%%d" % self.next_id
-            self.next_id += 1
-        p = FakePane(pane_id, window, session, **kw)
-        self.panes_[pane_id] = p
+        with self.lock:
+            if pane_id is None:
+                pane_id = "%%%d" % self.next_id
+                self.next_id += 1
+            p = FakePane(pane_id, window, session, **kw)
+            self.panes_[pane_id] = p
         return p
 
     def terminal(self, pane, orchestrator_ok=False, delay=0, sleep=None):
@@ -211,6 +214,7 @@ class FakeWt:
         self.outcome = "deleted"  # wt's branch_outcome for the next remove
         self.checked_out_at = None
         self.remove_ok = True
+        self.hook_output = []  # lines every hook prints
 
     def available(self):
         return True
@@ -222,8 +226,12 @@ class FakeWt:
         self.calls.append(("switch", repo, branch, create, base))
         return self.switch_result
 
-    def hook(self, worktree, name):
+    def hook(self, worktree, name, out=None):
+        """`out`, when given, takes the hook's output line by line (else it goes to stderr)."""
         self.calls.append(("hook", worktree, name))
+        for line in self.hook_output:
+            if out:
+                out(line)
         return True
 
     def remove(self, repo, worktree, force=False, branch="merged"):
@@ -240,18 +248,34 @@ class FakeWorktrees:
 
     def __init__(self):
         self.calls = []
-        self.ensured = None  # (dir, repo) that ensure returns
-        self.errors = {}  # method name -> FleetError it raises
+        self.ensured = None  # (dir, repo) that ensure returns; or a dict of them by branch
+        self.errors = {}  # method name, or (method name, branch) -> FleetError it raises
         self.removed = ["branch alpha deleted (merged)"]  # what remove returns (None: already gone)
+        self.repo = ""  # what fetch returns
+        self.on_ensure = None  # callback(branch) inside ensure
 
-    def _call(self, name, *args):
+    def _call(self, name, *args, branch=None):
         self.calls.append((name,) + args)
         if name in self.errors:
             raise self.errors[name]
+        if (name, branch) in self.errors:
+            raise self.errors[(name, branch)]
 
-    def ensure(self, src, branch, base=""):
-        self._call("ensure", src, branch, base)
-        return self.ensured
+    def labelled(self, label):
+        return self
+
+    def check_branch(self, branch):
+        self._call("check_branch", branch)
+
+    def fetch(self, src):
+        self._call("fetch", src)
+        return self.repo
+
+    def ensure(self, src, branch, base="", fetch=True):
+        self._call("ensure", src, branch, base, *(() if fetch else ("no-fetch",)), branch=branch)
+        if self.on_ensure:
+            self.on_ensure(branch)
+        return self.ensured[branch] if isinstance(self.ensured, dict) else self.ensured
 
     def check_removable(self, worktree):
         self._call("check_removable", worktree)

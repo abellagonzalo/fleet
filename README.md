@@ -58,7 +58,8 @@ and starts the orchestrator in window 0 with `/fleet-orchestrator`. `fleet new <
 opens a window named `<branch>` in the worktree `<repo>/<branch>`. If that worktree or branch
 already exists, fleet reuses it. Otherwise it fetches origin and branches from the default branch.
 The worktree is made with `wt`, and its post-start hooks run before claude starts, so `new` can
-take a minute. Workers start with `/fleet-worker` and reply `Ready: ...` when they are up. You
+take a minute. `fleet new <repo> <b1> <b2> ...` starts several workers in parallel, after fetching
+origin once, and prints one result line per branch. Workers start with `/fleet-worker` and reply `Ready: ...` when they are up. You
 address workers by window name, which is also their branch.
 
 **State.** `fleet new` wires `scripts/fleet-hook` into every worker through `claude --settings`.

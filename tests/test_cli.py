@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import tempfile
+import threading
 import unittest
 
 from fakes import Clock, FakeTmux, box_screen, fixture, make_ctx
@@ -29,15 +30,27 @@ class Args(unittest.TestCase):
     def test_new(self):
         o = A.parse_new(["repo", "feat", "--base", "origin/dev", "--mode", "auto", "--prompt-file", "p.md",
                          "--no-worktree", "--", "--model", "haiku", "--base"])
-        self.assertEqual(o, {"src": "repo", "name": "feat", "worktree": False, "base": "origin/dev",
+        self.assertEqual(o, {"src": "repo", "names": ["feat"], "worktree": False, "base": "origin/dev",
                              "mode": "auto", "prompt_file": "p.md", "prompt_stdin": False,
                              "extra": ["--model", "haiku", "--base"]})
         self.assertEqual(A.parse_new(["--mode", "plan", "r", "b"])["mode"], "plan")
         self.assertTrue(A.parse_new(["r", "b", "--prompt-stdin"])["prompt_stdin"])
-        for bad in (["repo"], [], ["r", "b", "c"], ["r", "b", "--base"], ["r", "b", "--zap"], ["r", "b", "--mode", ""],
+        for bad in (["repo"], [], ["r", "b", "--base"], ["r", "b", "--zap"], ["r", "b", "--mode", ""],
                     ["r", "b", "--prompt-stdin", "--prompt-file", "p.md"]):
             with self.assertRaises(A.UsageError, msg=bad):
                 A.parse_new(bad)
+
+    def test_new_several_branches(self):
+        o = A.parse_new(["repo", "a", "--base", "origin/dev", "b", "c", "--mode", "plan", "--", "--model", "haiku"])
+        self.assertEqual((o["src"], o["names"], o["base"], o["mode"], o["extra"]),
+                         ("repo", ["a", "b", "c"], "origin/dev", "plan", ["--model", "haiku"]))
+        for bad, msg in ((["r", "a", "b", "--prompt-stdin"], "fleet send"),
+                         (["r", "a", "b", "--prompt-file", "p.md"], "fleet send"),
+                         (["r", "a", "b", "--no-worktree"], "--no-worktree"),
+                         (["r", "a", "b", "a"], "'a' is given twice")):
+            with self.assertRaises(A.UsageError, msg=bad) as e:
+                A.parse_new(bad)
+            self.assertIn(msg, str(e.exception), bad)
 
     def test_status(self):
         self.assertEqual(A.parse_status([]), {"json": False})
@@ -940,6 +953,108 @@ class New(Fleet):
         code, _, _ = self.run_cmd("new", "--no-worktree", self.dir, "plain")
         self.assertEqual(code, 1)
         self.assertLessEqual(self.clock.t - start, 62)
+
+
+class NewSeveral(Fleet):
+    """`fleet new <repo> a b c`: validated up front, origin fetched once, workers started concurrently."""
+
+    def setUp(self):
+        super().setUp()
+        self.repo = os.path.realpath(os.path.join(self.dir, "repo"))
+        self.wts = self.ctx.worktrees
+        self.wts.repo = self.repo
+        self.wts.ensured = {}
+        for b in ("a", "b", "c"):
+            os.makedirs(os.path.join(self.repo, b))
+            self.wts.ensured[b] = (os.path.join(self.repo, b), self.repo)
+
+    def windows(self):
+        return sorted(p.window for p in self.tmux.panes_.values() if p.window in ("a", "b", "c"))
+
+    def trust_dialog_on(self, *names):
+        add = self.tmux.add
+
+        def new_window(session, name, cwd):
+            p = add(session, name)
+            if name in names:
+                p.shown = fixture("trust_dialog.ansi")
+            return p.id
+        self.tmux.new_window = new_window
+
+    def test_all_ready(self):
+        code, out, err = self.run_cmd("new", self.repo, "a", "b", "c", "--mode", "plan", "--", "--model", "haiku")
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertEqual(self.wts.calls[:4], [("check_branch", "a"), ("check_branch", "b"), ("check_branch", "c"),
+                                              ("fetch", self.repo)])
+        self.assertEqual(sorted(self.wts.calls[4:]), [("ensure", self.repo, b, "", "no-fetch") for b in "abc"])
+        self.assertEqual(self.windows(), ["a", "b", "c"])
+        for p in self.tmux.panes_.values():
+            if p.window in ("a", "b", "c"):
+                rec = self.rec(p)
+                d = os.path.join(self.repo, p.window)
+                self.assertEqual((rec["dir"], rec["worktree"], rec["branch"], rec["mode"]), (d, d, p.window, "plan"))
+                self.assertIn("--permission-mode plan --settings %s --model haiku" % os.path.join(self.dir, "hooks.json"),
+                              p.submitted[0][0])
+        self.assertTrue(out.endswith("ready: worker 'a' in %s\nready: worker 'b' in %s\nready: worker 'c' in %s\n"
+                                     "Attach: tmux attach -t fleet, then select a worker's window\n"
+                                     % tuple(os.path.join(self.repo, b) for b in "abc")), out)
+
+    def test_provisioning_runs_concurrently(self):
+        barrier = threading.Barrier(3, timeout=5)  # sequential provisioning would never get all three here
+        self.wts.on_ensure = lambda branch: barrier.wait()
+        code, out, err = self.run_cmd("new", self.repo, "a", "b", "c")
+        self.assertEqual((code, err), (0, ""), out)
+
+    def test_one_failure_does_not_stop_the_others(self):
+        self.wts.errors[("ensure", "b")] = FleetError("wt switch failed for b")
+        code, out, err = self.run_cmd("new", self.repo, "a", "b", "c")
+        self.assertEqual(code, 1)
+        self.assertIn("failed: worker 'b': wt switch failed for b\n", out)
+        self.assertIn("ready: worker 'a'", out)
+        self.assertIn("ready: worker 'c'", out)
+        self.assertEqual(self.windows(), ["a", "c"])
+        self.assertEqual(sorted(st.Store.load(f)["name"] for f in self.ctx.store.files()), ["a", "alpha", "beta", "c"])
+
+    def test_trust_dialog_on_some(self):
+        self.trust_dialog_on("b", "c")
+        code, out, err = self.run_cmd("new", self.repo, "a", "b", "c")
+        self.assertEqual((code, err), (3, ""), out)
+        self.assertIn("ready: worker 'a'", out)
+        for b in "bc":
+            self.assertIn("trust: worker '%s' is showing the folder-trust dialog; answer with fleet keys %s Down Enter\n"
+                          % (b, b), out)
+
+    def test_a_failure_outranks_the_trust_dialog(self):
+        self.trust_dialog_on("c")
+        self.wts.errors[("ensure", "a")] = FleetError("wt switch failed for a")
+        code, out, _ = self.run_cmd("new", self.repo, "a", "b", "c")
+        self.assertEqual(code, 1)
+        self.assertIn("trust: worker 'c'", out)
+
+    def test_refusals_start_nothing(self):
+        for argv, msg in (
+            (["new", self.repo, "a", "alpha"], "already runs in 'fleet'"),
+            (["new", self.repo, "a", "orch"], "orchestrator's window"),
+            (["new", self.repo, "a", "b", "a"], "given twice"),
+            (["new", self.repo, "a", "b", "--prompt-stdin"], "fleet send"),
+            (["new", self.repo, "a", "b", "--no-worktree"], "--no-worktree"),
+            (["new", "/nope", "a", "b"], "no such directory"),
+        ):
+            code, _, err = self.run_cmd(*argv)
+            self.assertEqual(code, 1, argv)
+            self.assertIn(msg, err, argv)
+        self.assertEqual(self.wts.calls, [])
+        self.assertEqual(self.windows(), [])
+
+    def test_bad_branch_or_layout_starts_nothing(self):
+        for key, error in (("check_branch", FleetError("'a..b' is not a valid branch name")),
+                           ("fetch", FleetError("%s does not follow <repo>/main" % self.repo))):
+            self.wts.errors = {key: error}
+            self.wts.calls = []
+            code, _, err = self.run_cmd("new", self.repo, "a", "b")
+            self.assertEqual((code, err), (1, "fleet: %s\n" % error))
+            self.assertNotIn("ensure", [c[0] for c in self.wts.calls])
+        self.assertEqual(self.windows(), [])
 
 
 class Up(unittest.TestCase):

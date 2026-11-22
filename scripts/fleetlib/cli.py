@@ -4,6 +4,7 @@ Every command takes a Ctx, which holds the system layer (tmux, a pane's Terminal
 Worktrees), the clock and the output streams, so the tests can drive commands against fakes.
 """
 
+import concurrent.futures
 import io
 import json
 import os
@@ -11,6 +12,7 @@ import re
 import shlex
 import sys
 import tempfile
+import threading
 import time
 
 from . import args as A
@@ -39,6 +41,12 @@ fleet new <repo|repo/main> <branch> [opts]     worker window <branch> in worktre
                          Either way, a prompt whose first line is a slash command is typed as that
                          line, with the lines after it passed as "(also read <file> and follow it)"
     -- args              extra claude args
+fleet new <repo|repo/main> <b1> <b2>... [opts] several workers at once: names checked and origin fetched before
+                                               anything starts, then all provisioned and started in parallel
+                                               (hook output prefixed [branch]). One line per branch: ready, failed
+                                               or trust. Exit 1 if any failed, else 3 if any shows the trust
+                                               dialog. --base, --mode and -- args apply to all; no --no-worktree,
+                                               no prompt: send each worker its first prompt with fleet send.
 fleet status [--json]                          every worker: state (starting|idle|busy|blocked|exited), outcome of
                                                its last turn (finished|interrupted), age, detail, last reply
 fleet send [--now] [--force] <worker> <text>   type text like a human, verify it landed, press Enter
@@ -95,6 +103,7 @@ class Ctx:
         self.store = st.Store(st.state_dir(self.environ))
         self.lifecycle = lc.Lifecycle(self.store, lambda: self.now(), glyph=self._glyph)
         self.delay = float(self.environ.get("FLEET_DELAY") or DELAY_DEFAULT)
+        self.print_lock = threading.Lock()  # `new` with several branches prints from threads
 
     def terminal(self, pane, orchestrator_ok=False):
         """The Terminal of `pane`: the only way commands send it keys or read its screen.
@@ -112,14 +121,16 @@ class Ctx:
         self.tmux.set_window_option(pane, "@fleet_state", value, check=False)
 
     def say(self, *lines):
-        for l in lines:
-            print(l, file=self.out)
-        self.out.flush()
+        with self.print_lock:
+            for l in lines:
+                print(l, file=self.out)
+            self.out.flush()
 
     def warn(self, *lines):
-        for l in lines:
-            print(l, file=self.err)
-        self.err.flush()
+        with self.print_lock:
+            for l in lines:
+                print(l, file=self.err)
+            self.err.flush()
 
 
 # ---------- session and targets ----------
@@ -244,7 +255,9 @@ def await_prompt(ctx, pane, name, dirname):
 
 def cmd_new(ctx, argv):
     o = A.parse_new(argv)
-    name, src = o["name"], o["src"]
+    if len(o["names"]) > 1:
+        return new_several(ctx, o)
+    name, src = o["names"][0], o["src"]
     ros = roster(ctx)
     ros.check_new_name(name)
     s = ros.session
@@ -253,31 +266,11 @@ def cmd_new(ctx, argv):
     prompt = prompt_text(ctx, o)  # read now: stdin is not there to read after a minute of wt hooks
     src = os.path.realpath(src)
 
-    repo = wt = ""
     if not o["worktree"]:
-        d = src
+        d, repo, wt = src, "", ""
     else:
-        d, repo = ctx.worktrees.ensure(src, name, o["base"])
-        d = os.path.realpath(d)
-        if d != W.main_checkout(repo):
-            wt = d
-
-    ctx.store.ensure()
-    hooks = os.path.join(ctx.store.root, "hooks.json")
-    st.Store.write(hooks, hooks_settings(ctx.hook_path, ctx.store.root))
-
-    pane = ctx.tmux.new_window(s, name, d)
-    if not re.match(r"^%\d+$", pane or ""):
-        raise FleetError("tmux did not report the new window's pane id (got %r)" % pane)
-    ctx.tmux.set_pane_option(pane, "@fleet_name", name)
-    style_window(ctx, pane)
-    ctx.lifecycle.create(pane, name=name, session=s, dir=d, repo=repo, worktree=wt,
-                         branch=name if repo else "", mode=o["mode"])
-
-    cmd = ["claude", "/fleet-worker", "--name", name, "--permission-mode", o["mode"], "--settings", hooks] + o["extra"]
-    term = ctx.terminal(pane)
-    term.type(_shell_line(cmd, ctx), paced=False)
-    term.submit()
+        d, repo, wt = provision(ctx.worktrees, src, name, o["base"])
+    pane = launch(ctx, s, name, d, repo, wt, o, write_hooks(ctx))
     try:
         await_prompt(ctx, pane, name, d)
     except (FleetError, FleetExit):
@@ -291,6 +284,82 @@ def cmd_new(ctx, argv):
         text, form = prompt
         return send(ctx, roster(ctx, session=s).lookup(name), text, form=form)
     return 0
+
+
+def new_several(ctx, o):
+    """`fleet new <repo> <b1> <b2> ...`: refuse before starting anything if any name can't be a new
+    worker, fetch origin once, then provision and launch every worker concurrently. One result line
+    per branch; exit 1 if any failed, else 3 if any shows the folder-trust dialog."""
+    names, src = o["names"], o["src"]
+    ros = roster(ctx)
+    for name in names:
+        ros.check_new_name(name)
+    if not os.path.isdir(src):
+        raise FleetError("no such directory: %s" % src)
+    src = os.path.realpath(src)
+    for name in names:
+        ctx.worktrees.check_branch(name)
+    ctx.worktrees.fetch(src)  # once: concurrent fetches of one repo race on its ref locks
+    hooks = write_hooks(ctx)
+
+    def start(name):
+        wts = ctx.worktrees.labelled(name)
+        try:
+            d, repo, wt = provision(wts, src, name, o["base"], fetch=False)
+            await_prompt(ctx, launch(ctx, ros.session, name, d, repo, wt, o, hooks), name, d)
+            return "ready", "ready: worker '%s' in %s" % (name, d)
+        except FleetExit as e:
+            if e.code != 3:
+                return "failed", "failed: worker '%s': %s" % (name, e.message or "exit %d" % e.code)
+            return "trust", ("trust: worker '%s' is showing the folder-trust dialog; answer with fleet keys %s "
+                             "Down Enter" % (name, name))
+        except FleetError as e:
+            ctx.say(*("[%s] %s" % (name, l) for l in e.screen))  # the screen the message calls "above"
+            return "failed", "failed: worker '%s': %s" % (name, e)
+        except Exception as e:  # a bug in one worker's start must not lose the others' results
+            return "failed", "failed: worker '%s': %s: %s" % (name, type(e).__name__, e)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(names)) as pool:
+        results = list(pool.map(start, names))
+    ctx.say(*(line for _, line in results))
+    kinds = [k for k, _ in results]
+    if "ready" in kinds:
+        ctx.say("Attach: tmux attach -t %s, then select a worker's window" % ros.session)
+    return 1 if "failed" in kinds else 3 if "trust" in kinds else 0
+
+
+def provision(wts, src, name, base, fetch=True):
+    """The worktree of branch `name` (found or made by `wts`): (dir, repo, worktree), where worktree
+    is "" when the dir is the repo's main checkout."""
+    d, repo = wts.ensure(src, name, base, fetch=fetch)
+    d = os.path.realpath(d)
+    return d, repo, "" if d == W.main_checkout(repo) else d
+
+
+def write_hooks(ctx):
+    """Write the --settings file every worker's claude gets; returns its path."""
+    ctx.store.ensure()
+    hooks = os.path.join(ctx.store.root, "hooks.json")
+    st.Store.write(hooks, hooks_settings(ctx.hook_path, ctx.store.root))
+    return hooks
+
+
+def launch(ctx, s, name, d, repo, wt, o, hooks):
+    """Open worker `name`'s window in session `s`, track it and start claude in `d`. Returns the pane;
+    the caller waits for the prompt box (await_prompt)."""
+    pane = ctx.tmux.new_window(s, name, d)
+    if not re.match(r"^%\d+$", pane or ""):
+        raise FleetError("tmux did not report the new window's pane id (got %r)" % pane)
+    ctx.tmux.set_pane_option(pane, "@fleet_name", name)
+    style_window(ctx, pane)
+    ctx.lifecycle.create(pane, name=name, session=s, dir=d, repo=repo, worktree=wt,
+                         branch=name if repo else "", mode=o["mode"])
+
+    cmd = ["claude", "/fleet-worker", "--name", name, "--permission-mode", o["mode"], "--settings", hooks] + o["extra"]
+    term = ctx.terminal(pane)
+    term.type(_shell_line(cmd, ctx), paced=False)
+    term.submit()
+    return pane
 
 
 def send(ctx, w, text, now=False, force=False, form=""):

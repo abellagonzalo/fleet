@@ -147,9 +147,49 @@ class Ensure(Repo):
         self.assertEqual(str(e.exception), "wt switch did not report the new worktree's path: {}")
 
     def test_failing_hook_warns(self):
-        self.wt.hook = lambda d, h: h != "post-start"
+        self.wt.hook = lambda d, h, out=None: h != "post-start"
         self.wts.ensure(self.repo, "feat")
         self.assertEqual(self.warned, ["warning: wt post-start hooks failed in %s" % self.new_wt])
+
+
+class SeveralBranches(Repo):
+    """`fleet new` with several branches fetches once up front, then ensures each without fetching."""
+
+    def push_later(self):
+        self.git("-C", os.path.join(self.dir, "seed"), "push", "--quiet", "origin", "HEAD:later")
+
+    def test_fetch_once_then_ensure_sees_what_it_fetched(self):
+        self.push_later()
+        self.assertEqual(self.wts.fetch(self.main), self.repo)
+        self.wts.ensure(self.repo, "later", fetch=False)
+        self.assertEqual(self.switches(), [(self.main, "later", False, None)])
+
+    def test_ensure_without_fetch_uses_local_refs(self):
+        self.push_later()
+        self.wts.ensure(self.repo, "later", fetch=False)
+        self.assertEqual(self.switches(), [(self.main, "later", True, "origin/main")])
+
+    def test_fetch_failure_warns(self):
+        self.git("-C", self.main, "remote", "set-url", "origin", os.path.join(self.dir, "gone.git"))
+        self.assertEqual(self.wts.fetch(self.repo), self.repo)
+        self.assertEqual(self.warned, ["warning: git fetch failed; using local refs"])
+
+    def test_fetch_of_a_repo_off_the_layout(self):
+        with self.assertRaises(FleetError):
+            self.wts.fetch(self.dir)
+
+    def test_check_branch(self):
+        self.wts.check_branch("feat")
+        with self.assertRaises(FleetError) as e:
+            self.wts.check_branch("a..b")
+        self.assertEqual(str(e.exception), "'a..b' is not a valid branch name")
+
+    def test_labelled_output(self):
+        self.wt.hook_output = ["compiling..."]
+        self.wts.labelled("feat").ensure(self.repo, "feat", fetch=False)
+        self.assertEqual(self.said[:2], ["[feat] worktree %s on new branch feat from origin/main" % self.new_wt,
+                                         "[feat] running wt pre-start hooks..."])
+        self.assertEqual(self.warned, ["[feat] compiling..."] * 3)
 
 
 class Removal(Repo):
