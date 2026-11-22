@@ -62,7 +62,7 @@ The `## Fleet` section is free-form markdown read by agents, not parsed by the C
 - `--prompt-stdin` hands the worker its first task once it is ready (see [Passing a prompt](#passing-a-prompt), including slash commands; there is no inline text form for `new`). The first task carries the [end-of-task policy](#end-of-task-policy).
 - **Exit 3 is the folder-trust dialog.** Trusting is the user's call: ask, and on yes run `fleet keys <branch> Down Enter`. Trust is inherited by subdirectories, so trusting the repo root once covers every future worktree.
 
-The worker loads `/fleet-worker` as its first prompt and replies `Ready: ...`. Done when `fleet status` shows that reply (or the worker `busy` on its first task).
+The worker loads `/fleet-worker` as its first prompt and replies `Ready: ...`. Done when `fleet status` shows that reply (or the worker `busy` on its first task). With `--prompt-stdin`, tell the user the worker is running its first task and give control back; don't wait for the task (see [Relaying a turn](#relaying-a-turn)).
 
 ## Passing a prompt
 
@@ -81,13 +81,19 @@ Unless the prompt starts with a slash command (below), fleet saves stdin to a fi
 
 ## Relaying a turn
 
-1. `fleet send --prompt-stdin <worker>` with the prompt as above. If this is the worker's first prompt of a task, it includes the [end-of-task policy](#end-of-task-policy).
-2. `fleet wait <worker> [timeout]`: exit 0 when the turn after your send finished (or the worker exited), 5 when it was interrupted, 4 when `blocked`, 2 on timeout (check `fleet status` and decide whether to keep waiting). It keeps waiting while a prompt you queued behind a busy turn has not run yet.
-3. `fleet last <worker> [n]` prints the worker's last reply from its transcript; relay it faithfully: the headline, then what the body asks the user to act on.
+**Don't block the user on a long wait.** While a wait runs in the foreground, the user can't talk to you, so they can't redirect you, answer a worker, or stop a mistake. Workers often take many minutes over a turn. The rule applies to every way a task goes out (`send`, `broadcast`, `fleet new … --prompt-stdin`):
 
-A turn is done when `fleet last` holds the reply to your prompt. On exit 5 someone stopped the turn: tell the user, and do not treat `fleet last` as the answer. On exit 4, run `fleet read <worker>` and relay the dialog to the user. On a `Need input:` headline, relay the question and send the user's answer back with `fleet send`.
+- **After sending, tell the user what went to whom and give control back.** Wait only if the user asked you to.
+- **A foreground wait gets an explicit timeout of at most 300 seconds**: `fleet wait <worker> 300` (its default is 600) or `broadcast --wait 300`.
+- **Never chain waits.** When a wait ends with any worker still running (a timeout), run `fleet status`, report each worker's state, and return to the user.
 
-To send **one prompt to several workers**, use `fleet broadcast [--to w1,w2] [--wait SECS] --prompt-stdin` (every worker gets the same typed text) instead of a loop: no `--to` means every tracked worker; a refusal (typed text, open dialog, unknown name) skips that worker only; `--wait` waits for all and prints each reply (exit 1 if any send failed, 4 if any blocked, 5 if any interrupted, 2 if any timed out). Same authority as `send`. A broadcast that starts a task carries the [end-of-task policy](#end-of-task-policy). Since every recipient gets the same prompt, broadcast only to workers in the same repo, or to workers whose repos share one policy.
+1. `fleet send --prompt-stdin <worker>` with the prompt as above. If this is the worker's first prompt of a task, it includes the [end-of-task policy](#end-of-task-policy). Then hand back to the user, per the rule above.
+2. If the user asked you to wait: `fleet wait <worker> 300` exits 0 when the turn after your send finished (or the worker exited), 5 when it was interrupted, 4 when `blocked`, 2 on timeout. It keeps waiting while a prompt you queued behind a busy turn has not run yet.
+3. **When the user comes back or asks about progress**, run `fleet status` and report in the order given under [Status](#status), with workers still `busy` last. For each worker whose last turn's outcome is `finished`, `fleet last <worker> [n]` prints its last reply from its transcript. Relay it faithfully: the headline, then what the body asks the user to act on.
+
+A turn is done when `fleet last` holds the reply to *your* prompt. Check that it answers what you sent: a worker that is `idle` with outcome `finished` may still be showing the turn before yours, if your prompt hasn't started yet. If the outcome is `interrupted` (or `wait` exited 5), someone stopped the turn: tell the user, and don't treat `fleet last` as the answer. If the worker is `blocked` (or `wait` exited 4), run `fleet read <worker>` and relay the dialog to the user. On a `Need input:` headline, relay the question and send the user's answer back with `fleet send`.
+
+To send **one prompt to several workers**, use `fleet broadcast [--to w1,w2] [--wait SECS] --prompt-stdin` (every worker gets the same typed text) instead of a loop: no `--to` means every tracked worker; a refusal (typed text, open dialog, unknown name) skips that worker only. `--wait SECS` (required value, within the bound above) waits for all and prints each reply: exit 1 if any send failed, 4 if any blocked, 5 if any interrupted, 2 if any timed out. A higher-priority code can hide timed-out workers, so check `fleet status` after any non-zero exit. Same authority as `send`. A broadcast that starts a task carries the [end-of-task policy](#end-of-task-policy). Since every recipient gets the same prompt, broadcast only to workers in the same repo, or to workers whose repos share one policy.
 
 To **steer mid-turn**, `fleet send --now` sends Ctrl+Enter: the worker drops the current turn and runs the new prompt. Plain `send` while busy queues the prompt. `fleet keys <worker> Escape` interrupts without a new prompt.
 
