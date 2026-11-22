@@ -371,7 +371,8 @@ def _switch_path(out):
 def await_prompt(ctx, pane, name, dirname):
     """Wait for claude's prompt box in `pane`. Exit 3 on the folder-trust dialog."""
     scr = None
-    for _ in range(PROMPT_TIMEOUT):
+    deadline = ctx.monotonic() + PROMPT_TIMEOUT
+    while ctx.monotonic() < deadline:
         ctx.sleep(1)
         scr = capture(ctx, pane)
         if scr.is_trust_dialog():

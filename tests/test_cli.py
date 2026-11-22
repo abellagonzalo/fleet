@@ -799,6 +799,24 @@ class New(Fleet):
         self.assertIn("did not show a prompt box within 60s", err)
         self.assertEqual(out, "$ claude\n")
 
+    def test_prompt_box_timeout_is_wall_clock(self):
+        # each screen capture takes a second: the 60 s budget must include that time
+        def new_window(session, name, cwd):
+            p = self.tmux.add(session, name)
+            p.screen = "$ claude\n"
+            return p.id
+        self.tmux.new_window = new_window
+        capture = self.tmux.capture
+
+        def slow_capture(pane, ansi=False, scrollback=0):
+            self.clock.t += 1
+            return capture(pane, ansi=ansi, scrollback=scrollback)
+        self.tmux.capture = slow_capture
+        start = self.clock.t
+        code, _, _ = self.run_cmd("new", "--no-worktree", self.dir, "plain")
+        self.assertEqual(code, 1)
+        self.assertLessEqual(self.clock.t - start, 62)
+
 
 class Up(unittest.TestCase):
     def test_up(self):
