@@ -69,11 +69,17 @@ class Store:
     def update(path, fields, lock_timeout=2.0):
         """Merge `fields` into the record under the lock. Returns the new record, or None if the
         file no longer exists (the worker was removed meanwhile; never recreate it)."""
+        return Store.change(path, lambda rec: rec.update(fields), lock_timeout)
+
+    @staticmethod
+    def change(path, fn, lock_timeout=2.0):
+        """Read the record, let fn(rec) change it in place, write it back, all under the lock.
+        Returns the new record, or None if the file no longer exists (never recreated)."""
         with locked(path, lock_timeout):
             rec = Store.load(path)
             if rec is None:
                 return None
-            rec.update(fields)
+            fn(rec)
             Store.write(path, rec)
             return rec
 

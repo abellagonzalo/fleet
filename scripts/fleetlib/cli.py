@@ -171,9 +171,9 @@ def capture(ctx, pane):
 
 # ---------- state ----------
 
-def reconcile(ctx, pane):
-    """Correct a stale busy/blocked state from the screen (hooks miss interrupts and cancelled
-    dialogs). Returns the record as it stands afterwards."""
+def screen_classifier(ctx, pane):
+    """(look, recheck) for the lifecycle: what the pane's screen shows ('dialog' | 'busy' | 'quiet',
+    None when unreadable), now and after a pause."""
 
     def look():
         try:
@@ -185,7 +185,13 @@ def reconcile(ctx, pane):
         ctx.sleep(lc.RECHECK_DELAY)
         return look()
 
-    return ctx.lifecycle.reconcile(pane, look, recheck)
+    return look, recheck
+
+
+def reconcile(ctx, pane):
+    """Correct a stale busy/blocked state from the screen (hooks miss interrupts and cancelled
+    dialogs). Returns the record as it stands afterwards."""
+    return ctx.lifecycle.reconcile(pane, *screen_classifier(ctx, pane))
 
 
 def sweep(ctx):
@@ -458,12 +464,13 @@ def send(ctx, name, text, now=False, force=False):
         if ctx.monotonic() >= deadline:
             ctx.say(*scr.tail(8))
             raise FleetError("typed text not visible in the prompt box; not submitting (screen above)")
+    if ctx.lifecycle.is_tracked(pane):
+        # before the key press, so the prompt's UserPromptSubmit and Stop are ordered after it
+        ctx.lifecycle.prompt_sent(pane)
     if now:
         ctx.tmux.send_literal(pane, CTRL_ENTER)
     else:
         ctx.tmux.send_keys(pane, "Enter")
-    if ctx.lifecycle.is_tracked(pane):
-        ctx.lifecycle.prompt_sent(pane)
     ctx.say("sent%s to %s: %s" % (" (now)" if now else "", name, text))
     return 0
 
@@ -513,23 +520,28 @@ def cmd_send(ctx, argv):
     return send(ctx, o["name"], prompt_text(ctx, o), now=o["now"], force=o["force"])
 
 
+WAIT_CODES = {"finished": 0, "exited": 0, "idle": 0, "interrupted": 5, "blocked": 4}
+
+
 def wait(ctx, name, timeout):
-    """0 when done/idle/exited, 4 when blocked, 2 on timeout."""
-    pane, path, rec = tracked(ctx, name)
+    """0 when the turn after the last send finished (or the worker exited, or, never sent to, is
+    idle), 5 when that turn was interrupted, 4 when blocked, 2 on timeout."""
+    pane, _, _ = tracked(ctx, name)
+    look, recheck = screen_classifier(ctx, pane)
     deadline = ctx.monotonic() + timeout
     while True:
-        rec = reconcile(ctx, pane)
-        if rec is None:
+        view = ctx.lifecycle.wait_view(pane, look, recheck)
+        if view is None:
             raise FleetError("'%s' is no longer tracked (its state file is gone)" % name)
-        s = lc.wait_state(rec)
-        if s in lc.WAIT_FINAL:
-            ctx.say(s)
-            return 0
-        if s == "blocked":
+        if view == "blocked":
+            rec = ctx.lifecycle.load(pane) or {}
             ctx.say("blocked: %s. See it with: fleet read %s" % (rec.get("detail", ""), name))
             return 4
+        if view in WAIT_CODES:
+            ctx.say(view)
+            return WAIT_CODES[view]
         if ctx.monotonic() >= deadline:
-            ctx.say("still %s after %ds" % (s, timeout))
+            ctx.say("still %s after %ds" % (view, timeout))
             return 2
         ctx.sleep(1)
 
@@ -559,7 +571,7 @@ def cmd_broadcast(ctx, argv):
     if o["wait"] is None:
         return rc
     # Workers run concurrently, so waiting on each in turn costs no more than the slowest.
-    blocked = timed_out = False
+    blocked = interrupted = timed_out = False
     for w in sent:
         try:
             wr = wait(ctx.quiet(), w, o["wait"])
@@ -572,21 +584,27 @@ def cmd_broadcast(ctx, argv):
         elif wr == 4:
             ctx.say("##### %s: BLOCKED, see it with: fleet read %s" % (w, w))
             blocked = True
+        elif wr == 5:
+            ctx.say("##### %s: INTERRUPTED, see it with: fleet read %s" % (w, w))
+            interrupted = True
         elif wr == 2:
             ctx.say("##### %s: still busy after %ss" % (w, o["wait"]))
             timed_out = True
         else:
             ctx.say("##### %s: wait failed (%s)" % (w, wr))
             rc = 1
-    return broadcast_code(rc != 0, blocked, timed_out)
+    return broadcast_code(rc != 0, blocked, timed_out, interrupted)
 
 
-def broadcast_code(failed, blocked, timed_out):
-    """1 if any send or wait failed, else 4 if any worker blocked, else 2 if any timed out."""
+def broadcast_code(failed, blocked, timed_out, interrupted=False):
+    """1 if any send or wait failed, else 4 if any worker blocked, else 5 if any turn was
+    interrupted, else 2 if any timed out."""
     if failed:
         return 1
     if blocked:
         return 4
+    if interrupted:
+        return 5
     if timed_out:
         return 2
     return 0
@@ -626,7 +644,7 @@ def settled_replies(ctx, tp, rec):
     fire before Claude Code has written that reply to the transcript, so right after `fleet wait` the
     transcript's last reply may still be the previous turn's. Re-read for a moment; if it never
     shows up, use the hook's copy."""
-    want = (rec.get("last_message") or "").strip() if rec.get("event") == "Stop" else ""
+    want = (rec.get("last_message") or "").strip() if rec.get("outcome") == "finished" else ""
     deadline = ctx.monotonic() + TRANSCRIPT_LAG
     while True:
         replies = transcript_replies(tp)
@@ -710,7 +728,7 @@ def cmd_status(ctx, argv):
     now = ctx.now()
     for r in recs:
         msg = re.sub(r"\s+", " ", r.get("last_message") or "")
-        ctx.say(row % (r.get("name", ""), r.get("state", ""), age(now - (r.get("ts") or 0)),
+        ctx.say(row % (r.get("name", ""), r.get("state", ""), age(now - (r.get("state_since") or 0)),
                        (r.get("detail") or "")[:22], msg[:80]))
     for u in untracked:
         ctx.say("%-24s %-8s" % (u, "untracked"))
