@@ -63,21 +63,27 @@ address workers by window name, which is also their branch.
 
 **State.** `fleet new` wires `scripts/fleet-hook` into every worker through `claude --settings`.
 The hook records each worker's state under `~/.local/state/fleet` (override it with
-`FLEET_STATE_DIR`) and marks the window tab:
+`FLEET_STATE_DIR`) and marks the window tab. A worker has a **state**, what it is doing now:
 
-| state     | meaning                                                         | tab |
-|-----------|-----------------------------------------------------------------|-----|
-| `busy`    | working on a turn                                               | ⋯   |
-| `blocked` | a permission dialog or question is waiting for you (plus a macOS notification) | ⚠ |
-| `done`    | finished a turn                                                 | ✓   |
-| `idle`    | fresh, or the turn was interrupted                              |     |
-| `exited`  | claude quit; the window holds a shell                           |     |
+| state      | meaning                                                         | tab |
+|------------|-----------------------------------------------------------------|-----|
+| `starting` | claude has not shown its prompt yet                             |     |
+| `idle`     | at its prompt, not working                                      | see below |
+| `busy`     | working on a turn                                               | ⋯   |
+| `blocked`  | a permission dialog or question is waiting for you (plus a macOS notification) | ⚠ |
+| `exited`   | claude quit; the window holds a shell                           |     |
+
+and the **outcome** of its last turn: `finished` (tab ✓), `interrupted` (tab ↯), or `none` in a
+fresh session (also after `/clear`). See `GLOSSARY.md` for the terms and
+`docs/adr/0001-worker-state-and-turn-ordering.md` for why they are kept apart.
+
+After upgrading fleet, restart running workers: older state files are not read correctly.
 
 Hooks miss a few changes, such as interrupts and cancelled dialogs. `status` and `wait` correct
 for that by reading the screen.
 
 **Hand-offs.** The worker skill makes every reply open with a headline that fits in `fleet status`:
-`Done: ...`, `Need input: ...` or `Failed: ...`. A `done` worker whose reply says `Need input:` is
+`Done: ...`, `Need input: ...` or `Failed: ...`. A worker whose finished turn says `Need input:` is
 waiting on you just as much as a `blocked` one.
 
 **Sending prompts safely.** Panes are shared with you, so `fleet send` types like a human, checks
@@ -98,9 +104,11 @@ a running turn.
 - `scripts/fleetlib/`: the code.
   - `cli.py`: the commands.
   - `screen.py`: reads Claude Code's TUI from tmux captures.
-  - `state.py`: the state files and the reconcile and wait rules.
+  - `lifecycle.py`: the worker record and every change to it (hook events, send, keys, reconcile
+    from the screen), and what `wait` and `status` see.
+  - `state.py`: storage for the worker records.
   - `system.py`: the only place that runs tmux, git or wt.
-  - `hook.py`: the hook.
+  - `hook.py`: the hook: parses the event and hands it to `lifecycle.py`.
 
 ## Development
 

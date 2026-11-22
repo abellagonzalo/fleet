@@ -17,18 +17,23 @@ All mechanics go through the `fleet` CLI, on PATH via `~/.local/bin/fleet` (`fle
 
 ## Status
 
-`fleet status` lists each worker's state, the age of its last event, a detail, and its last reply:
+`fleet status` lists each worker's state, the outcome of its last turn, how long it has been in that state, a detail, and its last reply. States:
 
+- `starting`: claude has not shown its prompt yet.
+- `idle`: at its prompt, not working. The outcome says how its last turn ended.
 - `busy`: working on a turn.
 - `blocked`: a permission dialog or a question is waiting for the user (detail says which). The user also gets a macOS notification and a red ⚠ on the window tab.
-- `done`: finished a turn (green ✓); the user may not have seen the reply yet.
-- `idle`: fresh, or the turn was interrupted.
 - `exited`: claude quit; the window holds a shell.
+
+Outcomes (of the last turn; blank in a fresh session or after `/clear`):
+
+- `finished`: the turn ended normally (green ✓); the user may not have seen the reply yet.
+- `interrupted`: the turn was stopped before it finished, by Escape or a cancelled dialog (yellow ↯). Its reply, if any, is partial.
 - `untracked`: a claude the user started by hand in the fleet session. It has no hooks, so no state; read its screen if asked about it.
 
 State comes from Claude Code hooks; `status` and `wait` correct it from the screen when a hook could not see the change (interrupts, cancelled dialogs).
 
-Workers start with the `fleet-worker` skill, so every reply opens with a **headline**: `Done:`, `Need input:` or `Failed:`, which is what the last-reply column shows. A `done` worker whose headline is `Need input:` is waiting on the user just like a `blocked` one. When reporting, lead with the workers that need the user: `blocked`, then `Need input:`, then `Failed:`, then the rest of `done`.
+Workers start with the `fleet-worker` skill, so every reply opens with a **headline**: `Done:`, `Need input:` or `Failed:`, which is what the last-reply column shows. A `finished` worker whose headline is `Need input:` is waiting on the user just like a `blocked` one. When reporting, lead with the workers that need the user: `blocked`, then `Need input:`, then `interrupted`, then `Failed:`, then the rest of `finished`.
 
 ## Starting a worker
 
@@ -57,12 +62,12 @@ fleet saves stdin to a file under its state dir and has the worker "Read <file> 
 ## Relaying a turn
 
 1. `fleet send --prompt-stdin <worker>` with the prompt as above.
-2. `fleet wait <worker> [timeout]`: exit 0 when `done`/`idle`, 4 when `blocked`, 2 on timeout (check `fleet status` and decide whether to keep waiting).
+2. `fleet wait <worker> [timeout]`: exit 0 when the turn after your send finished (or the worker exited), 5 when it was interrupted, 4 when `blocked`, 2 on timeout (check `fleet status` and decide whether to keep waiting). It keeps waiting while a prompt you queued behind a busy turn has not run yet.
 3. `fleet last <worker> [n]` prints the worker's last reply from its transcript; relay it faithfully: the headline, then what the body asks the user to act on.
 
-A turn is done when `fleet last` holds the reply to your prompt. On exit 4, run `fleet read <worker>` and relay the dialog to the user. On a `Need input:` headline, relay the question and send the user's answer back with `fleet send`.
+A turn is done when `fleet last` holds the reply to your prompt. On exit 5 someone stopped the turn: tell the user, and do not treat `fleet last` as the answer. On exit 4, run `fleet read <worker>` and relay the dialog to the user. On a `Need input:` headline, relay the question and send the user's answer back with `fleet send`.
 
-To send **one prompt to several workers**, use `fleet broadcast [--to w1,w2] [--wait SECS] --prompt-stdin` (all workers read the same file) instead of a loop: no `--to` means every tracked worker; a refusal (typed text, open dialog, unknown name) skips that worker only; `--wait` waits for all and prints each reply (exit 1 if any send failed, 4 if any blocked, 2 if any timed out). Same authority as `send`.
+To send **one prompt to several workers**, use `fleet broadcast [--to w1,w2] [--wait SECS] --prompt-stdin` (all workers read the same file) instead of a loop: no `--to` means every tracked worker; a refusal (typed text, open dialog, unknown name) skips that worker only; `--wait` waits for all and prints each reply (exit 1 if any send failed, 4 if any blocked, 5 if any interrupted, 2 if any timed out). Same authority as `send`.
 
 To **steer mid-turn**, `fleet send --now` sends Ctrl+Enter: the worker drops the current turn and runs the new prompt. Plain `send` while busy queues the prompt. `fleet keys <worker> Escape` interrupts without a new prompt.
 

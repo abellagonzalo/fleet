@@ -37,7 +37,8 @@ fleet new <repo|repo/main> <branch> [opts]     worker window <branch> in worktre
     --prompt-file P      once ready, send "Read P and do what it says."
     --prompt-stdin       the same, with stdin saved to a file under the state dir
     -- args              extra claude args
-fleet status [--json]                          every worker: state (busy|blocked|done|idle|exited), age, detail, last reply
+fleet status [--json]                          every worker: state (starting|idle|busy|blocked|exited), outcome of
+                                               its last turn (finished|interrupted), age, detail, last reply
 fleet send [--now] [--force] <worker> <text>   type text like a human, verify it landed, press Enter
                                                --now: Ctrl+Enter (interrupts a running turn, runs immediately)
                                                --force: send even though the prompt box holds typed text
@@ -48,8 +49,11 @@ fleet send [--now] [--force] <worker> <text>   type text like a human, verify it
 fleet broadcast [--to w1,w2] [--now] [--force] [--wait SECS] <text | --prompt-file P | --prompt-stdin>
                                                send to every tracked worker (or only --to); a refusal skips that
                                                worker, not the rest. --wait: wait for all, print each reply.
-                                               Exit 1 if any send failed, else 4 if any blocked, 2 if any timed out
-fleet wait <worker> [timeout_s]                block until done/idle (exit 0), blocked (exit 4) or timeout (exit 2)
+                                               Exit 1 if any send failed, else 4 if any blocked, 5 if any interrupted,
+                                               2 if any timed out
+fleet wait <worker> [timeout_s]                block until the turn after the last send finished (exit 0; also when
+                                               exited, or idle if never sent to), was interrupted (exit 5), is
+                                               blocked (exit 4), or timeout (exit 2)
 fleet last <worker> [n]                        last n assistant replies from the transcript (default 1)
 fleet read <worker> [lines]                    the screen plus <lines> of scrollback (default 60)
 fleet keys <worker> <tmux-key>...              raw keys for dialogs: Enter, Escape, Up, Down, BTab, 1, 2...
@@ -60,7 +64,8 @@ Workers are addressed by window name. Session: $FLEET_SESSION, else the fleet se
 
 STATUS_GLYPH = ("#{?#{==:#{@fleet_state},blocked},#[fg=red]⚠#[default],"
                 "#{?#{==:#{@fleet_state},busy},⋯,"
-                "#{?#{==:#{@fleet_state},done},#[fg=green]✓#[default],}}}")
+                "#{?#{==:#{@fleet_state},finished},#[fg=green]✓#[default],"
+                "#{?#{==:#{@fleet_state},interrupted},#[fg=yellow]↯#[default],}}}}")
 
 
 class Ctx:
@@ -723,12 +728,14 @@ def cmd_status(ctx, argv):
     if not recs and not untracked:
         ctx.say("(no workers)")
         return 0
-    row = "%-24s %-8s %-5s %-22s %s"
-    ctx.say(row % ("WORKER", "STATE", "AGE", "DETAIL", "LAST MESSAGE"))
+    row = "%-24s %-8s %-11s %-5s %-22s %s"
+    ctx.say(row % ("WORKER", "STATE", "OUTCOME", "AGE", "DETAIL", "LAST MESSAGE"))
     now = ctx.now()
     for r in recs:
         msg = re.sub(r"\s+", " ", r.get("last_message") or "")
-        ctx.say(row % (r.get("name", ""), r.get("state", ""), age(now - (r.get("state_since") or 0)),
+        outcome = r.get("outcome") or "none"
+        ctx.say(row % (r.get("name", ""), r.get("state", ""), "" if outcome == "none" else outcome,
+                       age(now - (r.get("state_since") or 0)),
                        (r.get("detail") or "")[:22], msg[:80]))
     for u in untracked:
         ctx.say("%-24s %-8s" % (u, "untracked"))
