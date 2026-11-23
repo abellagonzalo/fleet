@@ -262,6 +262,15 @@ def wait_view(rec):
     return "busy"
 
 
+SETTLED_VIEWS = ("idle", "finished", "interrupted", "exited")
+
+
+def is_settled(view):
+    """Is a worker whose wait view (see wait_view) is `view` settled: idle with no sent prompt still
+    waiting to start, or exited? A blocked worker is not."""
+    return view in SETTLED_VIEWS
+
+
 def glyph_value(rec):
     """The @fleet_state value the status bar shows: the state, with an idle worker's outcome."""
     state = rec.get("state") or ""

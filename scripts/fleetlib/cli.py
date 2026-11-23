@@ -65,6 +65,15 @@ fleet broadcast [--to w1,w2] [--now] [--force] [--wait SECS] <text | --prompt-fi
 fleet wait <worker> [timeout_s]                block until the turn after the last send finished (exit 0; also when
                                                exited, or idle if never sent to), was interrupted (exit 5), is
                                                blocked (exit 4), or timeout (exit 2)
+fleet watch [--to w1,w2] [timeout_s]           for Claude Code's Monitor: one line per event of the watched workers
+                                               (--to, else every tracked worker; fixed at start), flushed as it
+                                               happens: "<w> finished: <first line of reply>", "<w> interrupted",
+                                               "<w> blocked: <detail>. See it with: fleet read <w>", "<w> exited",
+                                               "<w> gone" (no longer tracked; dropped). Every turn counts, whoever
+                                               sent it. Exit 0 with "watch: all settled" once every watched worker
+                                               is idle with no prompt left to start, or exited (blocked is not);
+                                               exit 2 with "watch: timeout after Ns, still busy: ..." at timeout_s
+                                               (default 1800); exit 1 on an unknown worker or no workers
 fleet last <worker> [n]                        last n assistant replies from the transcript (default 1)
 fleet read <worker> [lines]                    the screen plus <lines> of scrollback (default 60)
 fleet keys <worker> <tmux-key>...              raw keys for dialogs: Enter, Escape, Up, Down, BTab, 1, 2...
@@ -564,6 +573,96 @@ def cmd_wait(ctx, argv):
     return wait(ctx, roster(ctx).worker(o["name"]), o["timeout"])
 
 
+class Watched:
+    """One worker under `fleet watch`: what has been reported about it so far, so every turn end,
+    change to blocked and exit is printed once. Starts from the record as it stands, corrected from
+    the screen first, so a change from before the start (an interrupt nobody reconciled yet) is not
+    reported as news."""
+
+    def __init__(self, ctx, h):
+        self.name, self.pane = h.name, h.pane
+        self.look, self.recheck = screen_classifier(ctx, h.pane)
+        rec = ctx.lifecycle.reconcile(h.pane, self.look, self.recheck) or {}
+        self.ended = rec.get("ended_seq") or 0
+        self.blocked_since = rec.get("state_since") if rec.get("state") == "blocked" else None
+        self.exited = rec.get("state") == "exited"
+        self.view = ""
+
+    def poll(self, ctx):
+        """The lines to print for what changed since the last poll; None once untracked."""
+        view = ctx.lifecycle.wait_view(self.pane, self.look, self.recheck)
+        rec = ctx.lifecycle.load(self.pane) if view is not None else None
+        if rec is None:
+            return None
+        self.view = view
+        lines = []
+        ended = rec.get("ended_seq") or 0
+        if ended > self.ended:  # one line even if several turns ended since the last poll
+            self.ended = ended
+            if rec.get("outcome") == "interrupted":
+                lines.append("%s interrupted" % self.name)
+            else:
+                head = headline(rec.get("last_message") or "")
+                lines.append("%s finished%s" % (self.name, ": " + head if head else ""))
+        if view == "blocked":
+            if self.blocked_since != rec.get("state_since"):
+                self.blocked_since = rec.get("state_since")
+                lines.append("%s blocked: %s. See it with: fleet read %s"
+                             % (self.name, rec.get("detail", ""), self.name))
+        else:
+            self.blocked_since = None
+        if view == "exited" and not self.exited:
+            lines.append("%s exited" % self.name)
+        self.exited = view == "exited"
+        return lines
+
+    def settled(self):
+        return lc.is_settled(self.view)
+
+
+def headline(text):
+    """The first non-blank line of a reply."""
+    for line in text.splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+def cmd_watch(ctx, argv):
+    """Print one line per turn end, change to blocked, exit or untracking of the watched workers, as
+    it happens; 0 once all are settled at the same time, 2 at the timeout."""
+    o = A.parse_watch(argv)
+    if not o["to"]:
+        ctx.store.ensure()
+        sweep(ctx)
+    ros = roster(ctx)
+    handles = [ros.worker(n) for n in o["to"]] or ros.workers()
+    if not handles:
+        raise FleetError("no workers to watch")
+    watched = [Watched(ctx, h) for h in handles]
+    deadline = ctx.monotonic() + o["timeout"]
+    while True:
+        for w in list(watched):
+            try:
+                lines = w.poll(ctx)
+            except FleetError as e:  # e.g. a lock held too long: try again next round
+                ctx.warn("fleet: %s: %s" % (w.name, e))
+                continue
+            if lines is None:
+                ctx.say("%s gone" % w.name)
+                watched.remove(w)
+            else:
+                ctx.say(*lines)
+        if all(w.settled() for w in watched):
+            ctx.say("watch: all settled")
+            return 0
+        if ctx.monotonic() >= deadline:
+            ctx.say("watch: timeout after %ds, still busy: %s"
+                    % (o["timeout"], ", ".join(w.name for w in watched if not w.settled())))
+            return 2
+        ctx.sleep(1)
+
+
 def cmd_broadcast(ctx, argv):
     o = A.parse_broadcast(argv)
     if not o["to"]:
@@ -775,6 +874,7 @@ def cmd_rm(ctx, argv):
 COMMANDS = {
     "up": cmd_up, "new": cmd_new, "status": cmd_status, "send": cmd_send, "wait": cmd_wait,
     "read": cmd_read, "last": cmd_last, "keys": cmd_keys, "rm": cmd_rm, "broadcast": cmd_broadcast,
+    "watch": cmd_watch,
 }
 
 

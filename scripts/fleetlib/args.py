@@ -140,10 +140,7 @@ def parse_broadcast(args):
             o["prompt_file"] = _value(args, i, a, "--prompt-file needs a path") or _no_path()
             i += 1
         elif a == "--to":
-            v = _value(args, i, a, "--to needs a comma-separated list of workers")
-            o["to"] = [w for w in v.split(",") if w]
-            if not o["to"]:
-                raise UsageError("--to needs a comma-separated list of workers")
+            o["to"] = _workers(args, i)
             i += 1
         elif a == "--wait":
             o["wait"] = _int(_value(args, i, a, "--wait needs a timeout in seconds"), "--wait")
@@ -157,6 +154,15 @@ def parse_broadcast(args):
             break
         i += 1
     return _prompt(o, args[i:], usage)
+
+
+def _workers(args, i):
+    """The worker names of the --to at args[i]."""
+    what = "--to needs a comma-separated list of workers"
+    names = [w for w in _value(args, i, "--to", what).split(",") if w]
+    if not names:
+        raise UsageError(what)
+    return names
 
 
 def _no_path():
@@ -197,6 +203,31 @@ def _name_and_count(args, usage, default, what):
 def parse_wait(args):
     o = _name_and_count(args, "usage: fleet wait <worker> [timeout_s]", 600, "timeout_s")
     return {"name": o["name"], "timeout": o["n"]}
+
+
+WATCH_TIMEOUT = 1800  # Claude Code's Monitor stops a watcher after 30 minutes: end before it does
+
+
+def parse_watch(args):
+    usage = "usage: fleet watch [--to w1,w2] [timeout_s]"
+    o = {"to": [], "timeout": WATCH_TIMEOUT}
+    timeout = None
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--to":
+            o["to"] = _workers(args, i)
+            i += 1
+        elif a.startswith("-") and not a[1:].isdigit():
+            raise UsageError("unknown option %s; %s" % (a, usage))
+        elif timeout is not None:
+            raise UsageError(usage)
+        else:
+            timeout = _int(a, "timeout_s")
+        i += 1
+    if timeout is not None:
+        o["timeout"] = timeout
+    return o
 
 
 def parse_read(args):

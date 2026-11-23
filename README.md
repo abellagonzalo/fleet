@@ -46,6 +46,7 @@ also run them yourself from any shell:
     EOF
     fleet status             # state, age and last reply of every worker
     fleet wait PROJ-123      # block until it finishes or needs you
+    fleet watch              # one line per finished, blocked or exited worker, until all are settled
     fleet last PROJ-123      # its last reply
     fleet rm PROJ-123        # close the window, remove the worktree if clean, delete the branch if merged
 
@@ -80,7 +81,7 @@ fresh session (also after `/clear`). See `GLOSSARY.md` for the terms and
 
 After upgrading fleet, restart running workers: older state files are not read correctly.
 
-Hooks miss a few changes, such as interrupts and cancelled dialogs. `status` and `wait` correct
+Hooks miss a few changes, such as interrupts and cancelled dialogs. `status`, `wait` and `watch` correct
 for that by reading the screen.
 
 **Hand-offs.** The worker skill makes every reply open with a headline that fits in `fleet status`:

@@ -106,6 +106,14 @@ class Args(unittest.TestCase):
                 with self.assertRaises(A.UsageError, msg=(fn.__name__, bad)):
                     fn(bad)
 
+    def test_watch(self):
+        self.assertEqual(A.parse_watch([]), {"to": [], "timeout": 1800})
+        self.assertEqual(A.parse_watch(["--to", "a,b", "60"]), {"to": ["a", "b"], "timeout": 60})
+        self.assertEqual(A.parse_watch(["60", "--to", "a"]), {"to": ["a"], "timeout": 60})
+        for bad in (["--to"], ["--to", ","], ["x"], ["-3"], ["1", "2"], ["--nope"]):
+            with self.assertRaises(A.UsageError, msg=bad):
+                A.parse_watch(bad)
+
     def test_keys_rm(self):
         self.assertEqual(A.parse_keys(["w", "Down", "Enter"]), {"name": "w", "keys": ["Down", "Enter"]})
         with self.assertRaises(A.UsageError):
@@ -485,6 +493,148 @@ class Wait(Fleet):
         code, _, _ = self.run_cmd("wait", "alpha", "30")
         self.assertEqual(code, 2)
         self.assertLess(self.clock.t - start, 32)
+
+
+class Watch(Fleet):
+    """`fleet watch`: one line per turn end, change to blocked, exit or untracking, until every
+    watched worker is settled or the timeout passes."""
+
+    def hook(self, pane, event, **payload):
+        self.ctx.lifecycle.hook_event(pane.id, event, payload)
+
+    def finish(self, pane, reply):
+        self.hook(pane, "UserPromptSubmit", prompt="go")
+        self.hook(pane, "Stop", last_assistant_message=reply)
+
+    def at(self, *steps):
+        """Run each (seconds after start, fn) once the fake clock reaches it."""
+        start = self.clock.t
+        todo = list(steps)
+
+        def tick(t):
+            while todo and t - start >= todo[0][0]:
+                todo.pop(0)[1]()
+        self.clock.on_sleep = tick
+
+    def test_all_settled_at_start(self):
+        self.assertEqual(self.run_cmd("watch"), (0, "watch: all settled\n", ""))
+
+    def test_reports_turn_ends_and_exits_once_all_settled(self):
+        self.track(self.a, state="busy", sent_seq=1, seq=1)
+        self.track(self.b, state="busy", sent_seq=1, seq=1)
+        self.a.shown = self.b.shown = fixture("busy.ansi")
+
+        def a_done():
+            self.finish(self.a, "Done: rebased\n\nDetails follow.")
+            self.a.shown = fixture("done.ansi")
+
+        def b_done():
+            self.hook(self.b, "UserPromptSubmit", prompt="go")
+            self.b.shown = fixture("interrupted.ansi")  # Escape: no Stop
+        self.at((3, a_done), (5, b_done))
+        code, out, err = self.run_cmd("watch")
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(out, "alpha finished: Done: rebased\nbeta interrupted\nwatch: all settled\n")
+
+    def test_blocked_then_answered_then_finished(self):
+        self.track(self.a, state="busy", sent_seq=1, seq=1)
+        self.a.shown = fixture("busy.ansi")
+        steps = [
+            (2, lambda: self.hook(self.a, "UserPromptSubmit", prompt="go")),
+            (3, lambda: self.hook(self.a, "PermissionRequest", tool_name="Bash")),
+            (6, lambda: self.hook(self.a, "PostToolUse")),
+            (9, lambda: self.hook(self.a, "Stop", last_assistant_message="Done: ok")),
+            (9, lambda: setattr(self.a, "shown", fixture("done.ansi"))),
+        ]
+        self.at(*steps)
+        code, out, _ = self.run_cmd("watch", "--to", "alpha")
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "alpha blocked: permission: Bash. See it with: fleet read alpha\n"
+                              "alpha finished: Done: ok\nwatch: all settled\n")
+
+    def test_new_work_after_a_finish_keeps_the_worker_watched(self):
+        self.track(self.a, state="busy", sent_seq=1, seq=1)
+        self.a.shown = fixture("busy.ansi")
+
+        def resend():
+            self.ctx.lifecycle.prompt_sent(self.a.id)
+        self.at((2, lambda: self.finish(self.a, "Done: one")), (2, resend),
+                (8, lambda: self.finish(self.a, "Done: two")),
+                (8, lambda: setattr(self.a, "shown", fixture("done.ansi"))))
+        code, out, _ = self.run_cmd("watch", "--to", "alpha")
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "alpha finished: Done: one\nalpha finished: Done: two\nwatch: all settled\n")
+
+    def test_a_queued_prompt_keeps_the_worker_unsettled(self):
+        # sent while busy: the earlier turn's Stop comes before the queued prompt is submitted
+        self.track(self.a, state="busy", submit_seq=1, sent_seq=2, seq=2)
+        self.a.shown = fixture("busy.ansi")
+        self.at((2, lambda: self.hook(self.a, "Stop", last_assistant_message="Done: earlier")),
+                (6, lambda: self.finish(self.a, "Done: queued")),
+                (6, lambda: setattr(self.a, "shown", fixture("done.ansi"))))
+        code, out, _ = self.run_cmd("watch", "--to", "alpha")
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "alpha finished: Done: earlier\nalpha finished: Done: queued\nwatch: all settled\n")
+
+    def test_turn_starts_and_startup_print_nothing(self):
+        self.track(self.a, state="starting")
+        self.at((2, lambda: self.hook(self.a, "SessionStart")))
+        self.assertEqual(self.run_cmd("watch", "--to", "alpha"), (0, "watch: all settled\n", ""))
+
+    def test_an_interrupt_from_before_start_is_not_reported(self):
+        self.track(self.a, state="busy", heard_at=self.clock.now() - 10, submit_seq=1, seq=1)
+        self.a.shown = fixture("interrupted.ansi")  # interrupted before watch started; nobody reconciled yet
+        self.assertEqual(self.run_cmd("watch", "--to", "alpha"), (0, "watch: all settled\n", ""))
+
+    def test_exited_and_gone(self):
+        self.track(self.a, state="busy", sent_seq=1, seq=1)
+        self.track(self.b, state="busy", sent_seq=1, seq=1)
+        self.a.shown = self.b.shown = fixture("busy.ansi")
+        self.at((2, lambda: self.hook(self.a, "SessionEnd")),
+                (4, lambda: self.ctx.lifecycle.forget(self.b.id)))
+        code, out, err = self.run_cmd("watch")
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(out, "alpha exited\nbeta gone\nwatch: all settled\n")
+
+    def test_timeout_lists_unsettled_workers(self):
+        self.track(self.a, state="busy", sent_seq=1, seq=1)
+        self.track(self.b, state="blocked", detail="question")
+        self.a.shown = fixture("busy.ansi")
+        self.b.shown = fixture("ask_user_question.ansi")
+        start = self.clock.t
+        code, out, _ = self.run_cmd("watch", "30")
+        self.assertEqual((code, out), (2, "watch: timeout after 30s, still busy: alpha, beta\n"))
+        self.assertLess(self.clock.t - start, 32)
+
+    def test_default_timeout(self):
+        self.track(self.a, state="busy", sent_seq=1, seq=1)
+        self.a.shown = fixture("busy.ansi")
+        code, out, _ = self.run_cmd("watch", "--to", "alpha")
+        self.assertEqual((code, out), (2, "watch: timeout after 1800s, still busy: alpha\n"))
+
+    def test_cannot_start(self):
+        self.tmux.add("fleet", "manual", "%5")
+        for argv in (["--to", "ghost"], ["--to", "alpha,manual"]):
+            code, out, err = self.run_cmd("watch", *argv)
+            self.assertEqual((code, out), (1, ""), argv)
+            self.assertTrue(err.startswith("fleet: "), err)
+        for p in ("%1", "%2"):
+            st.Store.remove(self.ctx.store.path(p))
+        self.assertEqual(self.run_cmd("watch"), (1, "", "fleet: no workers to watch\n"))
+
+    def test_each_line_is_flushed(self):
+        flushed = []
+
+        class Out(io.StringIO):
+            def flush(self):
+                flushed.append(self.getvalue())
+        self.ctx.out = Out()
+        self.track(self.a, state="busy", sent_seq=1, seq=1)
+        self.a.shown = fixture("busy.ansi")
+        self.at((2, lambda: self.finish(self.a, "Done: x")),
+                (2, lambda: setattr(self.a, "shown", fixture("done.ansi"))))
+        self.run_cmd("watch", "--to", "alpha")
+        self.assertIn("alpha finished: Done: x\n", flushed)
 
 
 class Broadcast(Fleet):
