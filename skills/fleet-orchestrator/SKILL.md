@@ -49,6 +49,33 @@ When the user asks you to pick the work (e.g. "pick 3 issues that can run in par
    - **Changes behavior**: the worker ends with `Need input:` before merging.
 5. **Present the choice and wait for approval** before any worker starts: the ranked candidates, the picks, each skipped candidate and why (conflicts with #N, blocked, not ready), any overlaps noted, and each pick's merge risk and proposed policy. Start workers only once the user agrees. That approval settles each pick's **Who merges** question; settle the rest of the [end-of-task policy](#end-of-task-policy) as that section says, including putting it in each worker's first prompt.
 
+## Report-only tasks: review and QA
+
+When the user asks you to **review a PR**, or to **QA a PR or a branch**, the worker runs a command on the branch and reports back: a **report-only task**.
+
+1. **Find the command.** Look in the `## Fleet` sections, most specific first as in the [end-of-task policy](#end-of-task-policy), for the review command or the QA command (e.g. `/code-review <fixed point>`, `/manual-qa <pr> [staging|dev]`). None configured: ask the user which command to run. Never guess one.
+2. **Find the repo and branch.**
+   - A PR URL names its repo: the local repo is the one whose `main` checkout has that GitHub repo as `origin` (usually `~/github/<owner>/<repo>`).
+   - A bare PR number, or a branch, means the current repo: your working directory, as `<repo>` or `<repo>/main`. If that is not a repo with the `<repo>/main` layout, ask which repo.
+   - For a PR, `gh pr view <pr> --json headRefName,baseRefName,body,url` (run in `<repo>/main`) gives the branch (`headRefName`), the base and the description.
+   - QA on a branch with no PR: ask the user what to test **before** starting the worker, and pass that as the command's target, so the worker doesn't stop to ask.
+3. **Find the worker.** The worker's branch is the PR's head branch (or the branch given).
+   - **A worker already has that branch** (`fleet status` lists it; often the one that wrote the PR): ask the user whether to send the task to that worker or wait until it's free. Don't start a second one.
+   - **Otherwise** `fleet new <repo> <branch>`: it reuses the branch's worktree, or checks the branch out from origin.
+4. **Build the first prompt**: the command on the first line, then the instructions below it (see [Passing a prompt](#passing-a-prompt)):
+   - **Sync first:** fetch origin, then fast-forward the branch to `origin/<branch>`. If the worktree has uncommitted changes or the branch has diverged, stop with `Need input:` and do nothing else.
+   - **For a review**, the fixed point is `origin/<base branch>`. The PR is the spec: its URL, its description, and any issue or Jira key it links. If there is still no spec, skip the spec part of the review rather than asking.
+   - **For QA**, pass the environment only if the user named one; the command's own default applies otherwise.
+   - **The report-only policy** below, in full.
+5. Start a watcher and hand back (see [Relaying a turn](#relaying-a-turn)). Relay the report as for any reply.
+
+**Report-only policy** (the default end-of-task policy for these tasks; the user may override any part of it in the session, e.g. "and post the review"):
+
+- **Done means:** the findings are in the hand-off; for QA, also the report's path, the pass/fail summary and any side effects left on the environment.
+- **Publish nothing:** no PR reviews, comments, approvals or labels; no chat messages; no ticket or wiki updates. Write the comments you would have posted into the hand-off as drafts.
+- **No commits and no pushes.** Writing local files is fine; say where they are. Untracked files inside the worktree make `fleet rm` refuse until `--force`, so prefer a path outside it.
+- QA still exercises the target environment: publishing is what is off limits, not testing.
+
 ## End-of-task policy
 
 Before a worker gets its first task (`fleet new … --prompt-stdin`, or the first `send`/`broadcast` of a task), settle with the user how the task ends. A worker can't see a correction until its current turn ends, so the policy goes out once, in full, with the task.
@@ -59,7 +86,7 @@ Before a worker gets its first task (`fleet new … --prompt-stdin`, or the firs
    - a `## Fleet` section in the user's global `~/.claude/CLAUDE.md` (already in your context);
    - the defaults below.
 2. **Settle three questions with the user**, offering what you found as the proposal:
-   - **Done means:** for work that ends in a PR, the default is that the tests pass, the PR is open and the linked issue is closed. For other work (an investigation, no PR), agree on what the hand-off must contain.
+   - **Done means:** for work that ends in a PR, the default is that the tests pass, the PR is open and the linked issue is closed. For a [report-only task](#report-only-tasks-review-and-qa) (a review or QA), the default is the report-only policy, which settles all three questions. For other work (an investigation, no PR), agree on what the hand-off must contain.
    - **Who merges, and when:** the default is that *the worker merges its own PR* once the agreed conditions hold, and otherwise ends with a `Need input:` hand-off. When you [chose the work](#choosing-work-for-parallel-workers), propose each pick's merge policy from its merge risk in place of this default; a policy from the session or a `## Fleet` section still wins. Either way, it takes effect only once the user agrees to it in this session. You relay; you don't merge.
    - **Verification gate:** check that the repo has CI before you name it as a condition (`.github/workflows/` exists, or `gh pr checks` on a recent PR reports checks). Without CI, the gate is the full local test suite, named by its command (e.g. `python3 -m unittest discover -s tests`).
 3. **Put the agreed policy in full into each worker's first prompt**, even when it comes from the repo's `CLAUDE.md`. When a task spans several repos, each worker gets its own repo's policy.

@@ -113,6 +113,14 @@ unblocked ones through the repo's own issue-tracker docs, ranks them (your prior
 any whose predicted changes collide with a pick already made, and proposes a merge policy for each
 from its risk. No worker starts until you approve the picks.
 
+**Reviews and QA.** Ask the orchestrator to review a PR, or to QA a PR or branch, and it starts a
+worker on the PR's branch, reusing its worktree or checking it out, and has it run the command
+named in your `## Fleet` section (it asks if there is none). A bare PR number means the current
+repo. These are report-only tasks by default: the worker reports its findings to you, may write
+local files, and publishes nothing (no PR comments or reviews, no chat messages) and pushes
+nothing, unless you say otherwise. If a worker already has the branch, the orchestrator asks
+whether to use it or wait.
+
 **End-of-task policy.** Before a worker starts on a task, the orchestrator agrees with you on what
 "done" means, who merges, and what verification a merge needs. It then puts that policy in full
 into the worker's first prompt. Its default proposal is that the worker merges its own PR once the
@@ -128,6 +136,8 @@ CLI doesn't parse it:
 - **Done means:** tests pass, PR opened, linked issue closed.
 - **Merging:** the worker merges its own PR when the tests and the verification gate pass; otherwise it replies `Need input:`.
 - **Verification:** no CI here; the gate is `python3 -m unittest discover -s tests` passing locally.
+- **Review command:** `/code-review <fixed point>`
+- **QA command:** `/manual-qa <pr> [staging|dev]` (staging unless I say dev)
 ```
 
 **Sending prompts safely.** Panes are shared with you, so `fleet send` types like a human, checks
