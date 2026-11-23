@@ -148,6 +148,15 @@ many workers, and `send --now` interrupts a running turn.
 `tmux capture-pane -e -p` and `*.txt` from `tmux capture-pane -p`. When Claude Code's UI changes,
 capture the new screen from a throwaway worker and add it there.
 
+`tests/fixtures/transcript_*.jsonl` are excerpts of real Claude Code transcripts, one per situation
+the hooks miss (interrupts, rejected or cancelled dialogs, queued prompts, `send --now`, `/clear`).
+They were captured from Claude Code 2.1.330 on a throwaway worker in default permission mode (see
+Live checks) and cut down to the records that matter. The working dir is `/WORKDIR`; `cwd`, session
+IDs, git branch, usage and hook commands are dropped; thinking text is emptied; record uuids are kept,
+since tests follow their `parentUuid` chain. `tests/test_transcript_fixtures.py` pins the format a
+transcript-based state check would rely on, so when a fresh capture fails it, Claude Code's
+transcript format changed. Findings: issue #15.
+
 ### Live checks
 
 Never test against the fleet you are working in. Use a session and state dir of your own:
