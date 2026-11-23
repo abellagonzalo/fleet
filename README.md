@@ -87,6 +87,11 @@ for that by reading the screen.
 `Done: ...`, `Need input: ...` or `Failed: ...`. A worker whose finished turn says `Need input:` is
 waiting on you just as much as a `blocked` one.
 
+**Choosing work.** Ask the orchestrator to pick issues to run in parallel and it finds the ready,
+unblocked ones through the repo's own issue-tracker docs, ranks them (your priorities first), skips
+any whose predicted changes collide with a pick already made, and proposes a merge policy for each
+from its risk. No worker starts until you approve the picks.
+
 **End-of-task policy.** Before a worker starts on a task, the orchestrator agrees with you on what
 "done" means, who merges, and what verification a merge needs. It then puts that policy in full
 into the worker's first prompt. Its default proposal is that the worker merges its own PR once the

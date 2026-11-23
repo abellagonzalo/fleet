@@ -35,6 +35,20 @@ State comes from Claude Code hooks; `status` and `wait` correct it from the scre
 
 Workers start with the `fleet-worker` skill, so every reply opens with a **headline**: `Done:`, `Need input:` or `Failed:`, which is what the last-reply column shows. A `finished` worker whose headline is `Need input:` is waiting on the user just like a `blocked` one. When reporting, lead with the workers that need the user: `blocked`, then `Need input:`, then `interrupted`, then `Failed:`, then the rest of `finished`.
 
+## Choosing work for parallel workers
+
+When the user asks you to pick the work (e.g. "pick 3 issues that can run in parallel"), choose it in these steps. Picking comes first, then the [end-of-task policy](#end-of-task-policy), then [starting the workers](#starting-a-worker).
+
+1. **Find the candidates.** Learn how to list issues, read their state and count open blockers from the repo's own issue-tracker docs: whatever the repo's `CLAUDE.md` or `AGENTS.md` points to (e.g. `docs/agents/issue-tracker.md`). Don't assume a tracker or its commands. Candidates are issues marked ready for an agent (or the tracker's equivalent) with no open blockers. **Never pick** an untriaged issue, one waiting on information, or one with an open blocker.
+2. **Rank them.** The user's priorities win: first what they say in this session, then priority labels or milestones in the tracker. Without either, the default order is: user-facing bugs, then friction in agent workflows, then flaky tests, then cleanups.
+3. **Pick work that won't collide.** Go through the candidates in rank order. For each, read its brief and the code, and predict which files it will change, and which functions or sections (of a doc or skill) within them.
+   - If it would change the same function or section as a pick already made, it **conflicts**: skip it.
+   - Changes to *different parts* of the same file are allowed. Note the overlap in the step-5 presentation, so the user can expect a small rebase.
+4. **Classify each pick by merge risk**, and propose a merge policy for it as part of its [end-of-task policy](#end-of-task-policy):
+   - **Low risk** (docs only, or a refactor that leaves the tests unchanged): the worker merges its own PR once the verification gate passes.
+   - **Changes behavior**: the worker ends with `Need input:` before merging.
+5. **Present the choice and wait for approval** before any worker starts: the ranked candidates, the picks, each skipped candidate and why (conflicts with #N, blocked, not ready), any overlaps noted, and each pick's merge risk and proposed policy. Start workers only once the user agrees. That approval settles each pick's **Who merges** question; settle the rest of the [end-of-task policy](#end-of-task-policy) as that section says, including putting it in each worker's first prompt.
+
 ## End-of-task policy
 
 Before a worker gets its first task (`fleet new … --prompt-stdin`, or the first `send`/`broadcast` of a task), settle with the user how the task ends. A worker can't see a correction until its current turn ends, so the policy goes out once, in full, with the task.
@@ -46,7 +60,7 @@ Before a worker gets its first task (`fleet new … --prompt-stdin`, or the firs
    - the defaults below.
 2. **Settle three questions with the user**, offering what you found as the proposal:
    - **Done means:** for work that ends in a PR, the default is that the tests pass, the PR is open and the linked issue is closed. For other work (an investigation, no PR), agree on what the hand-off must contain.
-   - **Who merges, and when:** the default is that *the worker merges its own PR* once the agreed conditions hold, and otherwise ends with a `Need input:` hand-off. This default takes effect only once the user agrees to it in this session. You relay; you don't merge.
+   - **Who merges, and when:** the default is that *the worker merges its own PR* once the agreed conditions hold, and otherwise ends with a `Need input:` hand-off. When you [chose the work](#choosing-work-for-parallel-workers), propose each pick's merge policy from its merge risk in place of this default; a policy from the session or a `## Fleet` section still wins. Either way, it takes effect only once the user agrees to it in this session. You relay; you don't merge.
    - **Verification gate:** check that the repo has CI before you name it as a condition (`.github/workflows/` exists, or `gh pr checks` on a recent PR reports checks). Without CI, the gate is the full local test suite, named by its command (e.g. `python3 -m unittest discover -s tests`).
 3. **Put the agreed policy in full into each worker's first prompt**, even when it comes from the repo's `CLAUDE.md`. When a task spans several repos, each worker gets its own repo's policy.
 4. **Changing the policy mid-task is the exception.** If it happens, tell the user that each worker sees the change only after its current turn ends.
