@@ -61,3 +61,7 @@ _Avoid_: done, finished (that's a turn outcome)
 
 **Reconcile**:
 Correcting a worker's state when the hooks missed a change (interrupts, rejected or cancelled dialogs). The transcript decides first: an interrupt marker for the worker's latest turn ends it as interrupted at once. A queued prompt the transcript shows starting a turn of its own is recorded like a submitted prompt (the worker is busy again). The screen is the fallback, once the state is old enough, when the transcript can't tell.
+
+**Report-only task**:
+A task whose only output is the worker's hand-off and any local files it writes. The worker publishes nothing (no PR reviews or comments, chat messages, ticket or wiki updates) and makes no commits or pushes. A PR review and QA of a PR or branch are report-only by default.
+_Avoid_: read-only task (it may write local files), dry run
