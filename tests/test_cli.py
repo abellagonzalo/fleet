@@ -477,6 +477,20 @@ class Wait(Fleet):
         self.assertEqual((code, out), (5, "interrupted\n"))
         self.assertEqual(self.rec(self.a)["outcome"], "interrupted")
 
+    def test_an_interrupt_in_the_transcript_is_seen_at_once(self):
+        tp = os.path.join(self.dir, "t.jsonl")
+        text = fixture("transcript_interrupt_tool.jsonl")
+        with open(tp, "w", encoding="utf-8") as f:
+            f.write(text)
+        pid = json.loads(text.splitlines()[0])["promptId"]
+        self.track(self.a, state="busy", sent_seq=1, seq=1, transcript_path=tp)
+        self.hook(self.a, "UserPromptSubmit", prompt="go", prompt_id=pid)
+        self.a.shown = fixture("busy.ansi")  # the screen never caught up
+        start = self.clock.t
+        code, out, _ = self.run_cmd("wait", "alpha", "5")
+        self.assertEqual((code, out), (5, "interrupted\n"))
+        self.assertEqual(self.clock.t, start)
+
     def test_exited(self):
         self.track(self.a, state="exited")
         self.assertEqual(self.run_cmd("wait", "alpha")[:2], (0, "exited\n"))

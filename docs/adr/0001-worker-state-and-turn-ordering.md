@@ -4,6 +4,8 @@ A worker record holds two separate things: its **state** (starting, idle, busy, 
 
 Events on a record are ordered by a per-record sequence number, bumped on every write under the record's lock, not by timestamps. `fleet wait` counts a turn as over only when it ended after a prompt was submitted that itself came after the last `fleet send` (`ended_seq > submit_seq > sent_seq`), so a Stop from the previous turn never answers a new prompt, including prompts queued behind a busy turn or sent with `--now`.
 
+Corrections for changes no hook reports (Escape, a rejected or cancelled dialog) follow the same rule. Whether they come from the transcript or, as a fallback, the screen, they are written under the lock with a seq bump, like any event, and are dropped if the seq moved while they were being decided. A transcript interrupt marker is matched to the turn by its `promptId` against the `prompt_id` of the latest UserPromptSubmit, never by order or time, so a marker from an earlier turn never ends the current one. The reader's saved position on the record is not an event and does not bump the seq.
+
 ## Considered Options
 
 - **Sub-second timestamps** instead of whole seconds: smaller change, but still a clock comparison, and does not handle a Stop that belongs to the turn before a queued send.

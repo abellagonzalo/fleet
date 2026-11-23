@@ -16,13 +16,16 @@ The record (one JSON file per worker):
     seq          bumped by every write; the only clock events are ordered by
     sent_seq     seq of the last `fleet send`
     submit_seq   seq of the last prompt submitted (UserPromptSubmit)
-    ended_seq    seq of the last turn end (Stop, or an interrupt seen on screen)
-    event, session_id, transcript_path, cwd, prompt, last_message     from the hooks
+    ended_seq    seq of the last turn end (Stop, or an interrupt seen in the transcript or on screen)
+    event, session_id, transcript_path, cwd, prompt, prompt_id, last_message     from the hooks
+    submit_prompt_id  prompt_id of the last UserPromptSubmit: the turn an interrupt marker must match
+    transcript   the transcript reader's saved position and turn facts (transcript.catch_up)
 
 Records written by older versions of fleet are not read correctly: restart workers after upgrading.
 """
 
 from . import state as st
+from . import transcript as tr
 
 EVENT_STATE = {
     "SessionStart": "idle",
@@ -87,7 +90,7 @@ class Lifecycle:
         def change(rec):
             seq = _bump(rec)
             rec["event"] = event
-            for k in ("session_id", "transcript_path", "cwd"):
+            for k in ("session_id", "transcript_path", "cwd", "prompt_id"):
                 if payload.get(k) is not None:
                     rec[k] = payload[k]
             state = EVENT_STATE[event]
@@ -99,6 +102,7 @@ class Lifecycle:
                 rec["detail"] = "question" if tool == "AskUserQuestion" else "permission: %s" % (tool or "?")
             elif event == "UserPromptSubmit":
                 rec["submit_seq"] = seq
+                rec["submit_prompt_id"] = payload.get("prompt_id")  # the turn interrupts are matched to
                 rec["prompt"] = (payload.get("prompt") or "")[:200]
             elif event == "Stop":
                 rec["ended_seq"] = seq
@@ -135,17 +139,28 @@ class Lifecycle:
         return self._change(pane, change)
 
     def reconcile(self, pane, look, recheck):
-        """Correct a stale busy/blocked state from the screen (hooks miss interrupts and cancelled
-        dialogs). look/recheck: see reconcile_decision. Returns the record as it stands afterwards.
+        """Correct a busy/blocked state the hooks could not: Escape, and a rejected or cancelled
+        dialog, fire no hook. The transcript decides first (see transcript_decision): an interrupt
+        marker for the latest turn ends it at once. The screen (see reconcile_decision) is the
+        fallback for what the transcript can't show. look/recheck: see reconcile_decision. Returns
+        the record as it stands afterwards.
 
-        The screen is read outside the lock (with a pause before the second look), so the
-        correction is dropped if any event was written meanwhile: that event is fresher news."""
+        The transcript and the screen are read outside the lock (with a pause before the second
+        look), so a correction is dropped if any event was written meanwhile: that event is fresher
+        news."""
         rec = self.load(pane)
         if rec is None:
             return None
+        rec = self._catch_up(pane, rec)
         judged_seq = rec.get("seq")
         now = self.now()
-        d = reconcile_decision(rec.get("state"), rec.get("heard_at"), now, look, recheck)
+        verdict = transcript_decision(rec)
+        if verdict == "interrupted":
+            d = ("idle", "interrupted")
+        elif verdict == "screen":
+            d = reconcile_decision(rec.get("state"), rec.get("heard_at"), now, look, recheck)
+        else:
+            d = None
         if d is None:
             return rec
         state, detail = d
@@ -163,10 +178,27 @@ class Lifecycle:
 
         return self._change(pane, change) or rec
 
+    def _catch_up(self, pane, rec):
+        """Read what is new in the worker's transcript and save the reader's state on the record.
+        Not an event, so no seq bump; saved only if no other reader saved first."""
+        before = rec.get("transcript")
+        path = rec.get("transcript_path")
+        if not path and not before:
+            return rec
+        after = tr.catch_up(before, path)
+        if after == before:
+            return rec
+
+        def change(rec):
+            if rec.get("transcript") == before and rec.get("transcript_path") == path:
+                rec["transcript"] = after
+
+        return self._change(pane, change, mirror=False) or rec
+
     # ---- what wait sees ----
 
     def wait_view(self, pane, look, recheck):
-        """What `fleet wait` acts on, after correcting the record from the screen: see wait_view().
+        """What `fleet wait` acts on, after correcting the record (see reconcile): see wait_view().
         A finished turn is also checked against the screen: a prompt queued behind a turn that made
         no tool calls runs as a turn of its own, and no hook says it started, so while the screen
         shows work the turn `wait` is after is not over. None when the worker is no longer tracked."""
@@ -211,6 +243,32 @@ def _set(rec, state, now, detail=""):
 
 
 # ---- the rules ----
+
+def transcript_decision(rec):
+    """What the transcript says about a busy/blocked worker: "interrupted" when an interrupt marker
+    belongs to its latest turn (matched by prompt id, never by order or time), "screen" when the
+    transcript can't decide and the screen should (see reconcile_decision), else None: leave the
+    record alone, the transcript or the next hook will settle it.
+
+    The transcript can't decide when it is unreadable, holds no prompt record (an unknown format:
+    fall back, don't guess) or not the latest turn's, when the hooks gave no prompt id, or when a
+    busy turn has had no reply yet: an Escape before any reply streams rewinds the prompt and
+    writes nothing."""
+    state = rec.get("state")
+    if state not in ("busy", "blocked"):
+        return None
+    facts = rec.get("transcript") or {}
+    prompt_id = rec.get("submit_prompt_id")
+    if not prompt_id:
+        return "screen"
+    if facts.get("interrupted") == prompt_id:
+        return "interrupted"
+    if facts.get("prompt") != prompt_id:
+        return "screen"
+    if state == "busy" and not facts.get("replied"):
+        return "screen"
+    return None
+
 
 def reconcile_decision(state, heard_at, now, look, recheck):
     """What a stale busy/blocked state should become, judged from the screen. Hooks miss interrupts

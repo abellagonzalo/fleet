@@ -81,8 +81,11 @@ fresh session (also after `/clear`). See `GLOSSARY.md` for the terms and
 
 After upgrading fleet, restart running workers: older state files are not read correctly.
 
-Hooks miss a few changes, such as interrupts and cancelled dialogs. `status`, `wait` and `watch` correct
-for that by reading the screen.
+Hooks miss a few changes: Escape, and a rejected or cancelled dialog, fire no hook. `status`, `wait`
+and `watch` correct for that from the worker's transcript, which marks such a turn as interrupted
+within a fraction of a second. They fall back to reading the screen only when the transcript can't
+tell: it can't be read, it doesn't show the latest prompt, or an Escape came before any reply
+streamed (Claude Code then writes nothing).
 
 **Hand-offs.** The worker skill makes every reply open with a headline that fits in `fleet status`:
 `Done: ...`, `Need input: ...` or `Failed: ...`. A worker whose finished turn says `Need input:` is
@@ -130,7 +133,9 @@ many workers, and `send --now` interrupts a running turn.
   - `cli.py`: the commands.
   - `screen.py`: reads Claude Code's TUI from tmux captures.
   - `lifecycle.py`: the worker record and every change to it (hook events, send, keys, reconcile
-    from the screen), and what `wait` and `status` see.
+    from the transcript or, as a fallback, the screen), and what `wait` and `status` see.
+  - `transcript.py`: reads a worker's Claude Code transcript (JSONL) incrementally, and what it
+    says about the latest turn.
   - `state.py`: storage for the worker records.
   - `worktrees.py`: the `<repo>/main` layout rule, find-or-create a worktree for a branch (for
     `new`), and removing one only when it is clean, with its branch once merged (for `rm`).

@@ -1,10 +1,12 @@
 """The worker lifecycle: transitions of a worker record, and what wait/status see."""
 
+import json
+import os
 import shutil
 import tempfile
 import unittest
 
-import fakes  # noqa: F401  (sets sys.path)
+from fakes import fixture
 
 from fleetlib import lifecycle as lc
 from fleetlib import state as st
@@ -171,6 +173,136 @@ class Turns(Worker):
         self.assertEqual(self.wait_view(), "starting")
 
 
+class TranscriptInterrupts(Worker):
+    """Escape and rejected or cancelled dialogs fire no hook: the transcript's interrupt marker ends
+    the turn. Fixtures: tests/fixtures/transcript_*.jsonl (#15)."""
+
+    def setUp(self):
+        super().setUp()
+        self.tpath = os.path.join(self.dir, "transcript.jsonl")
+        self.screen = "busy"  # the screen never decides here
+        self.event("SessionStart", transcript_path=self.tpath)
+
+    def records(self, name):
+        return [json.loads(text) for text in fixture("transcript_%s.jsonl" % name).splitlines() if text.strip()]
+
+    def write(self, records):
+        with open(self.tpath, "a", encoding="utf-8") as f:
+            for r in records:
+                f.write(json.dumps(r) + "\n")
+
+    def submit(self, records):
+        """`fleet send` and the UserPromptSubmit of the first prompt in `records`."""
+        prompt = next(r for r in records if r.get("promptSource"))
+        self.send()
+        self.event("UserPromptSubmit", prompt="go", prompt_id=prompt["promptId"], transcript_path=self.tpath)
+        return prompt["promptId"]
+
+    def assert_interrupted(self):
+        self.assertEqual(self.wait_view(), "interrupted")
+        r = self.rec()
+        self.assertEqual((r["state"], r["outcome"], r["ended_seq"]), ("idle", "interrupted", r["seq"]))
+
+    def test_interrupt_during_text(self):
+        recs = self.records("interrupt_text")
+        self.submit(recs)
+        self.write(recs[:-1])
+        self.assertEqual(self.wait_view(), "busy")
+        self.write(recs[-1:])
+        self.assert_interrupted()
+
+    def test_interrupt_during_a_tool_call(self):
+        recs = self.records("interrupt_tool")
+        self.submit(recs)
+        self.write(recs)
+        self.assert_interrupted()
+
+    def test_a_rejected_or_cancelled_dialog_ends_the_turn_from_blocked(self):
+        for name in ("permission_rejected", "permission_escape", "question_escape"):
+            with self.subTest(name):
+                recs = self.records(name)
+                pid = self.submit(recs)
+                tool = next(i for i, r in enumerate(recs) if r["type"] == "assistant"
+                            and any(c.get("type") == "tool_use" for c in r["message"]["content"]))
+                self.write(recs[:tool + 1])
+                self.event("PermissionRequest", tool_name="Write", prompt_id=pid)
+                self.assertEqual(self.wait_view(), "blocked")
+                self.write(recs[tool + 1:])
+                self.assert_interrupted()
+
+    def test_a_rejection_with_feedback_goes_on(self):
+        recs = self.records("permission_rejected_with_feedback")
+        pid = self.submit(recs)
+        second_try = [i for i, r in enumerate(recs) if r["type"] == "assistant"][-1]
+        self.write(recs[:second_try - 1])
+        self.event("PermissionRequest", tool_name="Write", prompt_id=pid)
+        self.write(recs[second_try - 1:second_try + 1])  # the denial with feedback; Claude tries again
+        self.t += lc.STALE + 10
+        self.assertEqual(self.wait_view(), "blocked")
+        self.assertEqual(self.rec()["outcome"], "none")
+
+    def test_a_marker_from_an_earlier_turn_never_ends_the_current_one(self):
+        old = self.records("interrupt_text")
+        self.submit(old)
+        self.write(old[:-1])
+        self.assertEqual(self.wait_view(), "busy")
+        new = self.records("finished")
+        self.submit(new)  # the next prompt is submitted before the old turn's marker is read
+        self.write(old[-1:] + new[:2])
+        self.t += lc.STALE + 10
+        self.assertEqual(self.wait_view(), "busy")
+        self.assertEqual(self.rec()["outcome"], "none")
+
+    def test_an_escape_before_any_reply_falls_back_to_the_screen(self):
+        recs = self.records("rewind")
+        self.submit(recs)
+        self.write(recs[:2])  # the dropped prompt, and nothing after it
+        self.screen = "quiet"
+        self.assertEqual(self.wait_view(), "busy")  # not stale yet
+        self.t += lc.STALE
+        self.assertEqual(self.wait_view(), "interrupted")
+
+    def test_an_unreadable_transcript_falls_back_to_the_screen(self):
+        self.submit(self.records("interrupt_text"))  # nothing is ever written to the file
+        self.screen = "quiet"
+        self.t += lc.STALE
+        self.assertEqual(self.wait_view(), "interrupted")
+
+    def test_a_transcript_without_prompt_records_falls_back_to_the_screen(self):
+        self.submit(self.records("interrupt_text"))
+        self.write([{"type": "something-else"}])
+        self.screen = "quiet"
+        self.t += lc.STALE
+        self.assertEqual(self.wait_view(), "interrupted")
+
+    def test_a_blocked_worker_whose_prompt_is_not_in_the_transcript_falls_back_to_the_screen(self):
+        self.write(self.records("finished"))  # an earlier turn; this one's prompt never shows up
+        self.submit(self.records("interrupt_tool"))
+        self.event("PermissionRequest", tool_name="Bash")
+        self.screen = "quiet"
+        self.t += lc.STALE
+        self.assertEqual(self.wait_view(), "interrupted")
+
+    def test_after_clear_only_the_new_transcript_counts(self):
+        old = self.records("interrupt_text")
+        self.submit(old)
+        self.write(old[:-1])
+        self.assertEqual(self.wait_view(), "busy")
+        self.event("SessionEnd", prompt_id=old[0]["promptId"])
+        self.write(old[-1:])  # never read: the session is over
+        self.tpath = os.path.join(self.dir, "after-clear.jsonl")
+        self.event("SessionStart", transcript_path=self.tpath)
+        self.write(self.records("clear"))
+        self.life.reconcile(self.PANE, self.look, self.look)
+        self.assertEqual((self.rec()["state"], self.rec()["outcome"]), ("idle", "none"))
+        recs = self.records("interrupt_tool")
+        self.submit(recs)
+        self.assertEqual(self.wait_view(), "busy")
+        self.write(recs)
+        self.assert_interrupted()
+        self.assertEqual(self.rec()["transcript"]["path"], self.tpath)
+
+
 class Dialogs(Worker):
     def test_permission_blocks_and_answering_resumes(self):
         self.send()
@@ -270,6 +402,14 @@ class Records(Worker):
         self.event("PermissionRequest", tool_name="Write")
         self.event("Stop", last_assistant_message="all done")
         self.assertEqual((self.rec()["last_message"], self.rec()["detail"]), ("all done", ""))
+
+    def test_hooks_record_the_turns_prompt_id(self):
+        self.event("UserPromptSubmit", prompt="go", prompt_id="p1")
+        self.assertEqual((self.rec()["prompt_id"], self.rec()["submit_prompt_id"]), ("p1", "p1"))
+        self.event("PermissionRequest", tool_name="Bash", prompt_id="p0")
+        self.assertEqual((self.rec()["prompt_id"], self.rec()["submit_prompt_id"]), ("p0", "p1"))
+        self.event("Stop", prompt_id="p1")
+        self.assertEqual(self.rec()["prompt_id"], "p1")
 
 
 

@@ -31,7 +31,7 @@ Outcomes (of the last turn; blank in a fresh session or after `/clear`):
 - `interrupted`: the turn was stopped before it finished, by Escape or a cancelled dialog (yellow ↯). Its reply, if any, is partial.
 - `untracked`: a claude the user started by hand in the fleet session. It has no hooks, so no state; read its screen if asked about it.
 
-State comes from Claude Code hooks; `status`, `wait` and `watch` correct it from the screen when a hook could not see the change (interrupts, cancelled dialogs).
+State comes from Claude Code hooks; `status`, `wait` and `watch` correct it from the worker's transcript when a hook could not see the change (interrupts, rejected or cancelled dialogs), and from the screen only when the transcript can't tell.
 
 Workers start with the `fleet-worker` skill, so every reply opens with a **headline**: `Done:`, `Need input:` or `Failed:`, which is what the last-reply column shows. A `finished` worker whose headline is `Need input:` is waiting on the user just like a `blocked` one. When reporting, lead with the workers that need the user: `blocked`, then `Need input:`, then `interrupted`, then `Failed:`, then the rest of `finished`.
 
