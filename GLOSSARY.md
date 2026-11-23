@@ -44,12 +44,16 @@ _Avoid_ "done" as a state: a finished turn is an idle worker whose last turn out
 ### Work
 
 **Turn**:
-One prompt received by a worker, whoever typed or sent it, and the work it triggers, up to the point where the worker is back at its prompt.
+One prompt received by a worker, whoever typed or sent it, plus any prompt absorbed into it while it runs, and the work they trigger, up to the point where the worker is back at its prompt.
 _Avoid_: task, job, run
 
 **Last turn outcome**:
 How the worker's most recent turn ended: none (no turn yet in this session), finished, or interrupted. Kept separately from the worker's state; a new session starts at none.
 _Avoid_: result, status
+
+**Reply**:
+The worker's final message of a turn: its hand-off to the orchestrator. A finished turn has exactly one; an interrupted turn has none. Text the worker writes earlier in the turn, between tool calls, is not a reply.
+_Avoid_: answer, response, last message
 
 **Settled**:
 A worker with nothing left to do until someone sends it a prompt: idle with no sent prompt still waiting to start, or exited. A blocked worker is not settled.
