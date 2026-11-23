@@ -2,7 +2,8 @@
 
 The hook (Claude Code events) and the CLI (new, send, keys, reconcile) change a worker's state only
 through a Lifecycle, and `wait`/`status` read it only through the functions here. `state.Store` is
-the storage underneath. Vocabulary: GLOSSARY.md. Why state and outcome are separate, and why events
+the storage underneath. A worker's replies are read
+from the record by replies.py, which also adds the latest turn to the saved transcript facts. Vocabulary: GLOSSARY.md. Why state and outcome are separate, and why events
 are ordered by sequence numbers instead of time: docs/adr/0001-worker-state-and-turn-ordering.md.
 
 The record (one JSON file per worker):
@@ -18,17 +19,19 @@ The record (one JSON file per worker):
     submit_seq   seq of the last prompt submitted (UserPromptSubmit, or a queued start seen in the
                  transcript)
     ended_seq    seq of the last turn end (Stop, or an interrupt seen in the transcript or on screen)
-    event, session_id, transcript_path, cwd, prompt, prompt_id, last_message     from the hooks
+    event, session_id, transcript_path, cwd, prompt, prompt_id     from the hooks
+    last_message the Stop hook's copy of the reply: replies.py's fallback, never shown directly
     submit_prompt_id  prompt_id of the last UserPromptSubmit: the turn an interrupt marker must match
     queued_prompt_id  promptId of the last queued prompt seen starting in the transcript, which is
                  written like a UserPromptSubmit (submit_seq, submit_prompt_id): no hook fires then
-    transcript   the transcript reader's saved position and turn facts (transcript.catch_up)
+    transcript   the transcript reader's saved position and turn facts, with the latest turn and
+                 its reply (replies.catch_up)
 
 Records written by older versions of fleet are not read correctly: restart workers after upgrading.
 """
 
+from . import replies as rp
 from . import state as st
-from . import transcript as tr
 
 EVENT_STATE = {
     "SessionStart": "idle",
@@ -189,7 +192,7 @@ class Lifecycle:
         path = rec.get("transcript_path")
         if not path and not before:
             return rec
-        after = tr.catch_up(before, path)
+        after = rp.catch_up(before, path)
         if after == before:
             return rec
 

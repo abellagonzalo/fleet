@@ -44,10 +44,10 @@ also run them yourself from any shell:
     fleet new ~/github/acme/api PROJ-123 --prompt-stdin <<'EOF'
     Fix the date parsing bug described in PROJ-123.
     EOF
-    fleet status             # state, age and last reply of every worker
+    fleet status             # state, age and latest reply of every worker
     fleet wait PROJ-123      # block until it finishes or needs you
     fleet watch              # one line per finished, blocked or exited worker, until all are settled
-    fleet last PROJ-123      # its last reply
+    fleet last PROJ-123 [n]  # the replies of its last n turns (default 1)
     fleet rm PROJ-123        # close the window, remove the worktree if clean, delete the branch if merged
 
 `fleet help` lists every command and flag.
@@ -92,6 +92,17 @@ runs as a turn of its own that no hook announces. The transcript shows when it s
 `send --now` or an Escape starts it early), so `wait` and `watch` keep waiting for it and `status`
 shows the worker busy while it runs. Only when the transcript can't tell (it can't be read, or
 holds no prompt record) does `wait` look at the screen after a finished turn instead.
+
+**Replies.** A reply is a worker's final message of a turn; what it writes between tool calls is
+not one. An interrupted turn has none, and a queued prompt absorbed into a running turn adds no
+second one. `last`, `status` and `watch` read replies from the transcript. `fleet last <worker> [n]` prints the replies
+of the last n turns, oldest first, each followed by `----`. An interrupted turn prints
+`(interrupted: no reply)` in its slot, including an Escape so early that the transcript has no
+record of the turn. Right after a turn ends, `last` waits up to 2 seconds for the transcript to
+catch up. `fleet status` shows the latest turn's reply in its REPLY column (80 characters), blank
+while the worker is busy or blocked, after an interrupted turn, and before any turn (a fresh session
+or after `/clear`). `status --json` gives it in full as `reply`. When the transcript can't be read,
+or doesn't catch up in time, the Stop hook's copy of a finished turn's reply stands in.
 
 **Hand-offs.** The worker skill makes every reply open with a headline that fits in `fleet status`:
 `Done: ...`, `Need input: ...` or `Failed: ...`. A worker whose finished turn says `Need input:` is
@@ -142,6 +153,8 @@ many workers, and `send --now` interrupts a running turn.
     from the transcript or, as a fallback, the screen), and what `wait` and `status` see.
   - `transcript.py`: reads a worker's Claude Code transcript (JSONL) incrementally, and what it
     says about the latest turn and the prompt queue.
+  - `replies.py`: a worker's replies: splits the transcript into turns and picks each finished
+    turn's reply, with the Stop hook's copy as the fallback. What `last`, `status` and `watch` show.
   - `state.py`: storage for the worker records.
   - `worktrees.py`: the `<repo>/main` layout rule, find-or-create a worktree for a branch (for
     `new`), and removing one only when it is clean, with its branch once merged (for `rm`).

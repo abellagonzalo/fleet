@@ -2,9 +2,11 @@
 
 - `follow(saved, path)`: the complete records written since the last read, and the position to save
   for the next one. The general reader: every kind of record goes through it.
-- `catch_up(saved, path)`: follow, plus what the records so far say about the latest turn and the
+- `catch_up(saved, path, folds)`: follow, plus what the records so far say about the latest turn and the
   prompt queue (the facts lifecycle.py decides interrupts and queued starts from). Saved on the
-  worker record between reads.
+  worker record between reads. `folds` lets a caller keep facts of its own from the same records
+  (replies.py keeps the latest turn).
+- `texts(rec)`: the text blocks of a record's message.
 
 A missing or unreadable file, or a line that isn't a JSON object, is no news, never an error. The
 format is Claude Code's and undocumented: tests/test_transcript_fixtures.py pins what fleet relies on.
@@ -37,7 +39,7 @@ def follow(saved, path):
     return [r for r in map(_parse, complete.splitlines()) if r is not None], position
 
 
-def catch_up(saved, path):
+def catch_up(saved, path, folds=None):
     """The worker's saved transcript facts after reading what is new in `path`: the position (see
     follow) plus what the records so far say about the latest turn:
 
@@ -57,13 +59,17 @@ def catch_up(saved, path):
                      after the Stop hook has run). An end record after a dequeue closes the turn
                      the dequeued prompt waited behind, not the dequeued prompt's.
 
-    A file read from the start again starts from no facts: the old file says nothing about it."""
+    `folds` adds facts of the caller's: {key: fn(fact, record) -> fact}, each record in turn (see
+    replies.catch_up). A file read from the start again starts from no facts: the old file says
+    nothing about it."""
     records, position = follow(saved, path)
     same_file = position["offset"] >= _resume_offset(saved, path) > 0
     facts = dict(saved) if same_file else {}
     facts.update(position)
     for rec in records:
         _observe(facts, rec)
+        for key, fold in (folds or {}).items():
+            facts[key] = fold(facts.get(key), rec)
     return facts
 
 
@@ -95,11 +101,11 @@ def _observe(facts, rec):
         facts["ended"] = facts.get("prompt")
     elif kind == "assistant":
         facts["replied"] = True
-    elif kind == "user" and any(t in INTERRUPT_MARKERS for t in _texts(rec)):
+    elif kind == "user" and any(t in INTERRUPT_MARKERS for t in texts(rec)):
         facts["interrupted"] = rec.get("promptId")
 
 
-def _texts(rec):
+def texts(rec):
     content = (rec.get("message") or {}).get("content")
     if isinstance(content, str):
         return [content]

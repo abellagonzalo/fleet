@@ -18,6 +18,7 @@ import time
 from . import args as A
 from . import lifecycle as lc
 from . import roster as R
+from . import replies as rp
 from . import screen as S
 from . import state as st
 from . import worktrees as W
@@ -602,7 +603,7 @@ class Watched:
             if rec.get("outcome") == "interrupted":
                 lines.append("%s interrupted" % self.name)
             else:
-                head = headline(rec.get("last_message") or "")
+                head = headline(rp.last_finished(rec))
                 lines.append("%s finished%s" % (self.name, ": " + head if head else ""))
         if view == "blocked":
             if self.blocked_since != rec.get("state_since"):
@@ -739,67 +740,22 @@ def cmd_read(ctx, argv):
     return 0
 
 
-TRANSCRIPT_LAG = 2.0  # how long the transcript may trail the Stop hook
+INTERRUPTED_SLOT = "(interrupted: no reply)"
 
 
 def last(ctx, w, n):
-    """The last n replies of worker `w` (a Roster handle)."""
+    """The replies of worker `w`'s last n turns (a Roster handle), oldest first; an interrupted turn
+    prints INTERRUPTED_SLOT in its place."""
     rec = ctx.lifecycle.load(R.require_worker(w).pane)
     if rec is None:
         raise FleetError("'%s' is no longer tracked (its state file is gone)" % w.name)
-    tp = rec.get("transcript_path") or ""
-    if not tp or not os.path.isfile(tp):
-        ctx.say(rec.get("last_message") or "(no reply yet)")
-        return 0
-    replies = settled_replies(ctx, tp, rec)
-    picked = replies[-n:] if n > 0 else []
+    picked = rp.recent(rec, n, ctx.sleep, ctx.monotonic)
     if not picked:
         ctx.say("(no reply yet)")
         return 0
     for r in picked:
-        ctx.say(r, "----")
+        ctx.say(INTERRUPTED_SLOT if r is None else r, "----")
     return 0
-
-
-def settled_replies(ctx, tp, rec):
-    """The transcript's replies, once it holds the reply the Stop hook reported. The Stop hook can
-    fire before Claude Code has written that reply to the transcript, so right after `fleet wait` the
-    transcript's last reply may still be the previous turn's. Re-read for a moment; if it never
-    shows up, use the hook's copy."""
-    want = (rec.get("last_message") or "").strip() if rec.get("outcome") == "finished" else ""
-    deadline = ctx.monotonic() + TRANSCRIPT_LAG
-    while True:
-        replies = transcript_replies(tp)
-        if not want or any(_same_reply(want, r) for r in replies[-3:]):
-            return replies
-        if ctx.monotonic() >= deadline:
-            return replies + [rec["last_message"]]
-        ctx.sleep(0.2)
-
-
-def _same_reply(hook_text, transcript_text):
-    a, b = S.compact(hook_text), S.compact(transcript_text)
-    return bool(a) and bool(b) and (a in b or b in a)
-
-
-def transcript_replies(path):
-    """The text of each assistant message in a Claude Code transcript (JSONL), in order."""
-    res = []
-    with open(path, encoding="utf-8", errors="replace") as f:
-        for line in f:
-            try:
-                e = json.loads(line)
-            except ValueError:
-                continue
-            if not isinstance(e, dict) or e.get("type") != "assistant":
-                continue
-            content = (e.get("message") or {}).get("content")
-            if not isinstance(content, list):
-                continue
-            texts = [c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text"]
-            if texts:
-                res.append("\n".join(texts))
-    return res
 
 
 def cmd_last(ctx, argv):
@@ -833,17 +789,18 @@ def cmd_status(ctx, argv):
     recs = [r for r in (reconcile(ctx, w.pane) for w in ros.workers()) if r is not None]
     untracked = [h.name for h in ros.untracked()]
     if o["json"]:
-        ctx.say(json.dumps({"workers": recs, "untracked": untracked}, indent=2, ensure_ascii=False))
+        workers = [dict(r, reply=rp.latest(r)) for r in recs]
+        ctx.say(json.dumps({"workers": workers, "untracked": untracked}, indent=2, ensure_ascii=False))
         return 0
     ctx.say("fleet session: %s" % s)
     if not recs and not untracked:
         ctx.say("(no workers)")
         return 0
     row = "%-24s %-8s %-11s %-5s %-22s %s"
-    ctx.say(row % ("WORKER", "STATE", "OUTCOME", "AGE", "DETAIL", "LAST MESSAGE"))
+    ctx.say(row % ("WORKER", "STATE", "OUTCOME", "AGE", "DETAIL", "REPLY"))
     now = ctx.now()
     for r in recs:
-        msg = re.sub(r"\s+", " ", r.get("last_message") or "")
+        msg = re.sub(r"\s+", " ", rp.latest(r)).strip()
         outcome = r.get("outcome") or "none"
         ctx.say(row % (r.get("name", ""), r.get("state", ""), "" if outcome == "none" else outcome,
                        age(now - (r.get("state_since") or 0)),

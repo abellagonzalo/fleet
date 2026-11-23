@@ -17,7 +17,7 @@ All mechanics go through the `fleet` CLI, on PATH via `~/.local/bin/fleet` (`fle
 
 ## Status
 
-`fleet status` lists each worker's state, the outcome of its last turn, how long it has been in that state, a detail, and its last reply. States:
+`fleet status` lists each worker's state, the outcome of its last turn, how long it has been in that state, a detail, and the reply of its latest turn (blank while it is `busy` or `blocked`, after an `interrupted` turn, and before its first turn). States:
 
 - `starting`: claude has not shown its prompt yet.
 - `idle`: at its prompt, not working. The outcome says how its last turn ended.
@@ -28,12 +28,12 @@ All mechanics go through the `fleet` CLI, on PATH via `~/.local/bin/fleet` (`fle
 Outcomes (of the last turn; blank in a fresh session or after `/clear`):
 
 - `finished`: the turn ended normally (green ✓); the user may not have seen the reply yet.
-- `interrupted`: the turn was stopped before it finished, by Escape or a cancelled dialog (yellow ↯). Its reply, if any, is partial.
+- `interrupted`: the turn was stopped before it finished, by Escape or a cancelled dialog (yellow ↯). It has no reply.
 - `untracked`: a claude the user started by hand in the fleet session. It has no hooks, so no state; read its screen if asked about it.
 
 State comes from Claude Code hooks; `status`, `wait` and `watch` correct it from the worker's transcript when a hook could not see the change (interrupts, rejected or cancelled dialogs), and from the screen only when the transcript can't tell.
 
-Workers start with the `fleet-worker` skill, so every reply opens with a **headline**: `Done:`, `Need input:` or `Failed:`, which is what the last-reply column shows. A `finished` worker whose headline is `Need input:` is waiting on the user just like a `blocked` one. When reporting, lead with the workers that need the user: `blocked`, then `Need input:`, then `interrupted`, then `Failed:`, then the rest of `finished`.
+Workers start with the `fleet-worker` skill, so every reply opens with a **headline**: `Done:`, `Need input:` or `Failed:`, which is what the REPLY column shows. A `finished` worker whose headline is `Need input:` is waiting on the user just like a `blocked` one. When reporting, lead with the workers that need the user: `blocked`, then `Need input:`, then `interrupted`, then `Failed:`, then the rest of `finished`.
 
 ## Choosing work for parallel workers
 
@@ -117,7 +117,7 @@ Every turn of a watched worker counts, whoever sent or typed it, and a worker se
 
 1. `fleet send --prompt-stdin <worker>` with the prompt as above. If this is the worker's first prompt of a task, it includes the [end-of-task policy](#end-of-task-policy). Then start a watcher and hand back to the user, per the rule above.
 2. If the user asked you to wait: `fleet wait <worker> 300` exits 0 when the turn after your send finished (or the worker exited), 5 when it was interrupted, 4 when `blocked`, 2 on timeout. It keeps waiting while a prompt you queued behind a busy turn has not run yet: fleet sees the queued prompt start in the worker's transcript.
-3. **When a watch line arrives, the user comes back, or the user asks about progress**, act on the lines as above, or run `fleet status` and report in the order given under [Status](#status), with workers still `busy` last. For each worker whose last turn's outcome is `finished`, `fleet last <worker> [n]` prints its last reply from its transcript. Relay it faithfully: the headline, then what the body asks the user to act on.
+3. **When a watch line arrives, the user comes back, or the user asks about progress**, act on the lines as above, or run `fleet status` and report in the order given under [Status](#status), with workers still `busy` last. For each worker whose last turn's outcome is `finished`, `fleet last <worker> [n]` prints the replies of its last n turns from its transcript, oldest first: one reply per turn (the worker's final message, never its narration between tool calls), and `(interrupted: no reply)` for an interrupted turn. Relay it faithfully: the headline, then what the body asks the user to act on.
 
 A turn is done when `fleet last` holds the reply to *your* prompt. Check that it answers what you sent: a worker that is `idle` with outcome `finished` may still be showing the turn before yours, if your prompt hasn't started yet, and a `finished` watch line can be for the turn your prompt was queued behind. If the outcome is `interrupted` (or `wait` exited 5), someone stopped the turn: tell the user, and don't treat `fleet last` as the answer. If the worker is `blocked` (or `wait` exited 4), run `fleet read <worker>` and relay the dialog to the user. On a `Need input:` headline, relay the question and send the user's answer back with `fleet send`.
 

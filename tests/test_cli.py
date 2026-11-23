@@ -590,6 +590,20 @@ class Watch(Fleet):
         self.assertEqual(code, 0)
         self.assertEqual(out, "alpha finished: Done: earlier\nalpha finished: Done: queued\nwatch: all settled\n")
 
+    def test_the_finished_headline_is_the_reply_status_shows(self):
+        tp = os.path.join(self.dir, "t.jsonl")
+        with open(tp, "w") as f:
+            f.write("".join(json.dumps(r) + "\n" for r in (
+                prompt_rec("p1"), text_rec("Let me look."), TOOL_REC, text_rec("\n  all good\nmore"), END_REC)))
+        self.track(self.a, state="busy", sent_seq=1, seq=1, transcript_path=tp)
+        self.a.shown = fixture("busy.ansi")
+        self.at((1, lambda: (self.hook(self.a, "UserPromptSubmit", prompt="go", prompt_id="p1"),
+                             self.hook(self.a, "Stop", prompt_id="p1", last_assistant_message="hook copy"))))
+        code, out, _ = self.run_cmd("watch", "--to", "alpha")
+        self.assertEqual((code, out), (0, "alpha finished: all good\nwatch: all settled\n"))
+        status = self.run_cmd("status")[1].splitlines()[2]
+        self.assertEqual(status[75:], "all good more")
+
     def test_turn_starts_and_startup_print_nothing(self):
         self.track(self.a, state="starting")
         self.at((2, lambda: self.hook(self.a, "SessionStart")))
@@ -745,7 +759,7 @@ class Broadcast(Fleet):
         self.assertEqual(code, 5)
         self.assertEqual(out, "sent to alpha\nsent to beta\n"
                               "##### alpha: INTERRUPTED, see it with: fleet read alpha\n"
-                              "##### beta: finished\nrebased\n")
+                              "##### beta: finished\nrebased\n----\n")
 
     def go_busy_once_sent(self, *panes):
         def tick(t):
@@ -782,14 +796,14 @@ class Broadcast(Fleet):
         code, out, _ = self.run_cmd("broadcast", "--wait", "30", "rebase")
         self.assertEqual(code, 2)
         self.assertEqual(out, "sent to alpha\nsent to beta\n"
-                              "##### alpha: finished\nrebased\n##### beta: still busy after 30s\n")
+                              "##### alpha: finished\nrebased\n----\n##### beta: still busy after 30s\n")
         self.assertLess(self.clock.t - start, 40)
 
 
 class Status(Fleet):
     def test_table(self):
         self.track(self.a, state="idle", outcome="finished", state_since=self.clock.now() - 125,
-                   last_message="all\n  good")
+                   last_message="all\n  good")  # no transcript: the hook's copy stands in
         self.track(self.b, state="blocked", detail="permission: Bash and a very long detail",
                    state_since=self.clock.now() - 1)
         self.b.shown = fixture("permission_dialog.ansi")
@@ -799,11 +813,34 @@ class Status(Fleet):
         self.assertEqual(code, 0)
         self.assertEqual(out.splitlines(), [
             "fleet session: fleet",
-            "WORKER                   STATE    OUTCOME     AGE   DETAIL                 LAST MESSAGE",
+            "WORKER                   STATE    OUTCOME     AGE   DETAIL                 REPLY",
             "alpha                    idle     finished    2m                           all good",
             "beta                     blocked              1s    permission: Bash and a ",
             "byhand                   untracked",
         ])
+
+    def test_the_reply_is_the_latest_turns_and_blank_when_it_has_none(self):
+        tp = os.path.join(self.dir, "t.jsonl")
+        with open(tp, "w") as f:
+            f.write("".join(json.dumps(r) + "\n" for r in (
+                prompt_rec("p1"), text_rec("Let me look."), TOOL_REC, text_rec("from the  transcript"), END_REC)))
+        cleared = os.path.join(self.dir, "cleared.jsonl")
+        with open(cleared, "w") as f:
+            f.write(fixture("transcript_clear.jsonl"))
+        c = self.tmux.add("fleet", "gamma", "%3", fleet_name="gamma")
+        d = self.tmux.add("fleet", "delta", "%4", fleet_name="delta")
+        self.track(self.a, outcome="finished", prompt_id="p1", transcript_path=tp, last_message="hook")
+        self.track(self.b, state="busy", outcome="finished", prompt_id="p2", transcript_path=tp, last_message="hook")
+        self.track(c, outcome="interrupted", prompt_id="p1", submit_prompt_id="p2", transcript_path=tp,
+                   last_message="hook")
+        self.track(d, outcome="none", prompt_id="p1", transcript_path=cleared, last_message="hook")
+        self.b.shown = fixture("busy.ansi")
+        rows = self.run_cmd("status")[1].splitlines()[2:6]
+        self.assertEqual([(r.split()[0], r[75:]) for r in rows],
+                         [("alpha", "from the transcript"), ("beta", ""), ("gamma", ""), ("delta", "")])
+        d = json.loads(self.run_cmd("status", "--json")[1])
+        self.assertEqual([(w["name"], w["reply"]) for w in d["workers"]],
+                         [("alpha", "from the  transcript"), ("beta", ""), ("gamma", ""), ("delta", "")])
 
     def test_json(self):
         code, out, _ = self.run_cmd("status", "--json")
@@ -861,48 +898,66 @@ class Keys(Fleet):
         self.assertEqual(self.a.intents, [("press", ("Down", "Enter"))])
         self.assertEqual(self.rec(self.a)["state"], "busy")
 
+def prompt_rec(pid):
+    return {"type": "user", "promptSource": "typed", "promptId": pid, "message": {"content": "go"}}
+
+
+def text_rec(*texts):
+    return {"type": "assistant", "message": {"content": [{"type": "text", "text": t} for t in texts]}}
+
+
+TOOL_REC = {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash"}]}}
+END_REC = {"type": "system", "subtype": "turn_duration"}
+
+
 class LastAndRead(Fleet):
-    def test_last_from_transcript(self):
+    def transcript(self, *recs):
         tp = os.path.join(self.dir, "t.jsonl")
-        lines = [
-            {"type": "user", "message": {"content": "hi"}},
-            {"type": "assistant", "message": {"content": [{"type": "text", "text": "one"}]}},
-            {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash"}]}},
-            {"type": "assistant", "message": {"content": [{"type": "text", "text": "two"},
-                                                          {"type": "text", "text": "lines"}]}},
-        ]
-        with open(tp, "w") as f:
-            f.write("\n".join(json.dumps(l) for l in lines) + "\nnot json\n")
-        self.track(self.a, transcript_path=tp)
+        with open(tp, "a") as f:
+            f.write("".join(json.dumps(r) + "\n" for r in recs))
+        return tp
+
+    def test_last_gives_each_turns_final_message(self):
+        tp = self.transcript(prompt_rec("p1"), text_rec("Let me look."), TOOL_REC, text_rec("one"), END_REC,
+                             prompt_rec("p2"), text_rec("Checking."), TOOL_REC, text_rec("two", "lines"), END_REC)
+        with open(tp, "a") as f:
+            f.write("not json\n")
+        self.track(self.a, transcript_path=tp, outcome="finished", prompt_id="p2", last_message="two")
         self.assertEqual(self.run_cmd("last", "alpha")[1], "two\nlines\n----\n")
-        self.assertEqual(self.run_cmd("last", "alpha", "5")[1], "one\n----\ntwo\nlines\n----\n")
+        self.assertEqual(self.run_cmd("last", "alpha", "3")[1], "one\n----\ntwo\nlines\n----\n")
+
+    def test_last_marks_an_interrupted_turn(self):
+        interrupted = [json.loads(l) for l in fixture("transcript_interrupt_text.jsonl").splitlines()]
+        tp = self.transcript(prompt_rec("p1"), text_rec("one"), END_REC, *interrupted)
+        pid = interrupted[0]["promptId"]
+        self.track(self.a, transcript_path=tp, outcome="interrupted", submit_prompt_id=pid, prompt_id=pid)
+        self.assertEqual(self.run_cmd("last", "alpha", "2")[1], "one\n----\n(interrupted: no reply)\n----\n")
+
+    def test_last_marks_an_early_escape_that_left_no_record(self):
+        tp = self.transcript(prompt_rec("p1"), text_rec("one"), END_REC)
+        self.track(self.a, transcript_path=tp, outcome="interrupted", submit_prompt_id="p2", prompt_id="p2")
+        self.assertEqual(self.run_cmd("last", "alpha", "2")[1], "one\n----\n(interrupted: no reply)\n----\n")
 
     def test_last_waits_for_the_transcript_to_catch_up(self):
-        # Seen live: Stop fired (last_message "new") ~0.2s before the transcript had the reply.
-        tp = os.path.join(self.dir, "t.jsonl")
-        entry = lambda t: json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": t}]}}) + "\n"
-        with open(tp, "w") as f:
-            f.write(entry("old"))
-        self.track(self.a, transcript_path=tp, outcome="finished", last_message="new")
+        # Seen live: Stop fired ~0.3s before the transcript had the turn's end.
+        tp = self.transcript(prompt_rec("p1"), text_rec("old"), END_REC, prompt_rec("p2"))
+        self.track(self.a, transcript_path=tp, outcome="finished", prompt_id="p2", last_message="new (hook)")
 
         def flush(t):
-            with open(tp, "a") as f:
-                f.write(entry("new"))
+            self.transcript(text_rec("new"), END_REC)
             self.clock.on_sleep = None
         self.clock.on_sleep = flush
         self.assertEqual(self.run_cmd("last", "alpha")[1], "new\n----\n")
 
     def test_last_falls_back_to_the_hook_copy(self):
-        tp = os.path.join(self.dir, "t.jsonl")
-        with open(tp, "w") as f:
-            f.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "old"}]}}) + "\n")
-        self.track(self.a, transcript_path=tp, outcome="finished", last_message="new")
+        tp = self.transcript(prompt_rec("p1"), text_rec("old"), END_REC, prompt_rec("p2"), text_rec("Let me look."))
+        self.track(self.a, transcript_path=tp, outcome="finished", prompt_id="p2", last_message="new")
         self.assertEqual(self.run_cmd("last", "alpha", "2")[1], "old\n----\nnew\n----\n")
 
     def test_last_without_transcript(self):
         self.assertEqual(self.run_cmd("last", "alpha")[1], "(no reply yet)\n")
-        self.track(self.a, last_message="from the hook")
-        self.assertEqual(self.run_cmd("last", "alpha")[1], "from the hook\n")
+        self.track(self.a, outcome="finished", last_message="from the hook")
+        self.assertEqual(self.run_cmd("last", "alpha")[1], "from the hook\n----\n")
 
     def test_read_drops_blank_lines(self):
         self.a.shown = "a\n\nb\n\n"

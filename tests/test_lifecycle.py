@@ -435,13 +435,13 @@ class TranscriptQueuedPrompts(TranscriptWorker):
         self.event("Stop", last_assistant_message="poem", prompt_id=old)
         start = self.queued_prompt(recs)
         self.write(recs[3:start + 2])  # the queued prompt and its reply, not its end yet
-        read = lc.tr.catch_up
+        read = lc.rp.catch_up
 
         def stop_while_reading(saved, path):
             facts = read(saved, path)
             self.event("Stop", last_assistant_message="banana")  # the queued turn's Stop
             return facts
-        with mock.patch.object(lc.tr, "catch_up", stop_while_reading):
+        with mock.patch.object(lc.rp, "catch_up", stop_while_reading):
             self.life.reconcile(self.PANE, self.look, self.look)
         r = self.rec()
         self.assertEqual((r["state"], r["outcome"], r["last_message"]), ("idle", "finished", "banana"))
