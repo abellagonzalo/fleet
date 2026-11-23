@@ -51,5 +51,9 @@ _Avoid_: task, job, run
 How the worker's most recent turn ended: none (no turn yet in this session), finished, or interrupted. Kept separately from the worker's state; a new session starts at none.
 _Avoid_: result, status
 
+**Settled**:
+A worker with nothing left to do until someone sends it a prompt: idle with no sent prompt still waiting to start, or exited. A blocked worker is not settled.
+_Avoid_: done, finished (that's a turn outcome)
+
 **Reconcile**:
 Correcting a worker's state from what its screen shows, once the state is old enough that the hooks may have missed a change (interrupts, cancelled dialogs).
