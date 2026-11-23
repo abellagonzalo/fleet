@@ -87,6 +87,12 @@ within a fraction of a second. They fall back to reading the screen only when th
 tell: it can't be read, it doesn't show the latest prompt, or an Escape came before any reply
 streamed (Claude Code then writes nothing).
 
+A prompt sent while a worker is busy is queued, and if the turn ahead of it makes no tool calls it
+runs as a turn of its own that no hook announces. The transcript shows when it starts (and when
+`send --now` or an Escape starts it early), so `wait` and `watch` keep waiting for it and `status`
+shows the worker busy while it runs. Only when the transcript can't tell (it can't be read, or
+holds no prompt record) does `wait` look at the screen after a finished turn instead.
+
 **Hand-offs.** The worker skill makes every reply open with a headline that fits in `fleet status`:
 `Done: ...`, `Need input: ...` or `Failed: ...`. A worker whose finished turn says `Need input:` is
 waiting on you just as much as a `blocked` one.
@@ -135,7 +141,7 @@ many workers, and `send --now` interrupts a running turn.
   - `lifecycle.py`: the worker record and every change to it (hook events, send, keys, reconcile
     from the transcript or, as a fallback, the screen), and what `wait` and `status` see.
   - `transcript.py`: reads a worker's Claude Code transcript (JSONL) incrementally, and what it
-    says about the latest turn.
+    says about the latest turn and the prompt queue.
   - `state.py`: storage for the worker records.
   - `worktrees.py`: the `<repo>/main` layout rule, find-or-create a worktree for a branch (for
     `new`), and removing one only when it is clean, with its branch once merged (for `rm`).

@@ -2,8 +2,9 @@
 
 - `follow(saved, path)`: the complete records written since the last read, and the position to save
   for the next one. The general reader: every kind of record goes through it.
-- `catch_up(saved, path)`: follow, plus what the records so far say about the latest turn (the
-  facts lifecycle.py decides interrupts from). Saved on the worker record between reads.
+- `catch_up(saved, path)`: follow, plus what the records so far say about the latest turn and the
+  prompt queue (the facts lifecycle.py decides interrupts and queued starts from). Saved on the
+  worker record between reads.
 
 A missing or unreadable file, or a line that isn't a JSON object, is no news, never an error. The
 format is Claude Code's and undocumented: tests/test_transcript_fixtures.py pins what fleet relies on.
@@ -41,9 +42,20 @@ def catch_up(saved, path):
     follow) plus what the records so far say about the latest turn:
 
         prompt       promptId of the latest prompt record (absent: none seen, format unknown)
+        source       that record's promptSource: "typed", or "queued" for a queued prompt that runs
+                     as a turn of its own (behind a turn without tool calls, or after `send --now`
+                     or an Escape)
         replied      whether an assistant record came after that prompt
         interrupted  promptId of the latest interrupt marker: Escape during text or a tool call, or
                      a rejected or cancelled dialog. A rejection with feedback writes none.
+        queued       how many queued prompts are still waiting: enqueues not yet matched by a
+                     dequeue (it starts a turn of its own) or a remove (absorbed into the running
+                     turn at a tool call)
+        dequeued     whether a dequeued prompt has not started yet: its prompt record comes after
+                     the end record (or interrupt marker) of the turn it waited behind
+        ended        promptId of the latest prompt whose turn ended (system/turn_duration, written
+                     after the Stop hook has run). An end record after a dequeue closes the turn
+                     the dequeued prompt waited behind, not the dequeued prompt's.
 
     A file read from the start again starts from no facts: the old file says nothing about it."""
     records, position = follow(saved, path)
@@ -71,7 +83,16 @@ def _parse(raw):
 def _observe(facts, rec):
     kind = rec.get("type")
     if kind == "user" and "promptSource" in rec:
-        facts["prompt"], facts["replied"] = rec.get("promptId"), False
+        facts["prompt"], facts["source"], facts["replied"] = rec.get("promptId"), rec.get("promptSource"), False
+        facts["dequeued"] = False
+    elif kind == "queue-operation":
+        op = rec.get("operation")
+        queued = facts.get("queued") or 0
+        facts["queued"] = queued + 1 if op == "enqueue" else max(0, queued - 1)
+        if op == "dequeue":
+            facts["dequeued"] = True
+    elif kind == "system" and rec.get("subtype") == "turn_duration" and not facts.get("dequeued"):
+        facts["ended"] = facts.get("prompt")
     elif kind == "assistant":
         facts["replied"] = True
     elif kind == "user" and any(t in INTERRUPT_MARKERS for t in _texts(rec)):

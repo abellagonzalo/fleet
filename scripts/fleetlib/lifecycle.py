@@ -15,10 +15,13 @@ The record (one JSON file per worker):
     heard_at     epoch seconds of the last state-setting event or screen correction (staleness)
     seq          bumped by every write; the only clock events are ordered by
     sent_seq     seq of the last `fleet send`
-    submit_seq   seq of the last prompt submitted (UserPromptSubmit)
+    submit_seq   seq of the last prompt submitted (UserPromptSubmit, or a queued start seen in the
+                 transcript)
     ended_seq    seq of the last turn end (Stop, or an interrupt seen in the transcript or on screen)
     event, session_id, transcript_path, cwd, prompt, prompt_id, last_message     from the hooks
     submit_prompt_id  prompt_id of the last UserPromptSubmit: the turn an interrupt marker must match
+    queued_prompt_id  promptId of the last queued prompt seen starting in the transcript, which is
+                 written like a UserPromptSubmit (submit_seq, submit_prompt_id): no hook fires then
     transcript   the transcript reader's saved position and turn facts (transcript.catch_up)
 
 Records written by older versions of fleet are not read correctly: restart workers after upgrading.
@@ -101,8 +104,7 @@ class Lifecycle:
                 tool = payload.get("tool_name")
                 rec["detail"] = "question" if tool == "AskUserQuestion" else "permission: %s" % (tool or "?")
             elif event == "UserPromptSubmit":
-                rec["submit_seq"] = seq
-                rec["submit_prompt_id"] = payload.get("prompt_id")  # the turn interrupts are matched to
+                _submitted(rec, seq, payload.get("prompt_id"))
                 rec["prompt"] = (payload.get("prompt") or "")[:200]
             elif event == "Stop":
                 rec["ended_seq"] = seq
@@ -139,9 +141,10 @@ class Lifecycle:
         return self._change(pane, change)
 
     def reconcile(self, pane, look, recheck):
-        """Correct a busy/blocked state the hooks could not: Escape, and a rejected or cancelled
-        dialog, fire no hook. The transcript decides first (see transcript_decision): an interrupt
-        marker for the latest turn ends it at once. The screen (see reconcile_decision) is the
+        """Correct what the hooks could not: a queued prompt starting a turn of its own, Escape, and
+        a rejected or cancelled dialog fire no hook. The transcript decides first: a queued start
+        (see queued_start) is written like a UserPromptSubmit, then an interrupt marker for the
+        latest turn ends it at once (see transcript_decision). The screen (see reconcile_decision) is the
         fallback for what the transcript can't show. look/recheck: see reconcile_decision. Returns
         the record as it stands afterwards.
 
@@ -151,12 +154,13 @@ class Lifecycle:
         rec = self.load(pane)
         if rec is None:
             return None
+        judged_seq = rec.get("seq")  # before the transcript is read: an event meanwhile is fresher
         rec = self._catch_up(pane, rec)
-        judged_seq = rec.get("seq")
+        rec, judged_seq = self._record_queued_start(pane, rec, judged_seq)
         now = self.now()
         verdict = transcript_decision(rec)
-        if verdict == "interrupted":
-            d = ("idle", "interrupted")
+        if verdict in ("interrupted", "finished"):
+            d = ("idle", verdict)
         elif verdict == "screen":
             d = reconcile_decision(rec.get("state"), rec.get("heard_at"), now, look, recheck)
         else:
@@ -169,9 +173,9 @@ class Lifecycle:
             if rec.get("seq") != judged_seq:
                 return
             seq = _bump(rec)
-            if state == "idle":  # the turn is over without a Stop: interrupted
+            if state == "idle":  # the turn is over without a Stop after its start
                 _set(rec, "idle", now)
-                rec["outcome"] = "interrupted"
+                rec["outcome"] = detail
                 rec["ended_seq"] = seq
             else:
                 _set(rec, state, now, detail)
@@ -195,17 +199,46 @@ class Lifecycle:
 
         return self._change(pane, change, mirror=False) or rec
 
+    def _record_queued_start(self, pane, rec, judged_seq):
+        """A queued prompt the transcript shows running as a turn of its own (see queued_start) is
+        written like a UserPromptSubmit: no hook says it started. Dropped if the record's seq moved
+        from `judged_seq`, the seq before the transcript was read. Returns the record and the seq
+        later corrections are judged against: the start's own, once written."""
+        prompt_id = queued_start(rec)
+        if not prompt_id:
+            return rec, judged_seq
+        now = self.now()
+        written = []
+
+        def change(rec):
+            if rec.get("seq") != judged_seq:
+                return
+            seq = _bump(rec)
+            _set(rec, "busy", now)
+            _submitted(rec, seq, prompt_id)
+            rec["queued_prompt_id"] = prompt_id
+            written.append(seq)
+
+        rec = self._change(pane, change) or rec
+        return rec, (written[0] if written else judged_seq)
+
     # ---- what wait sees ----
 
     def wait_view(self, pane, look, recheck):
         """What `fleet wait` acts on, after correcting the record (see reconcile): see wait_view().
-        A finished turn is also checked against the screen: a prompt queued behind a turn that made
-        no tool calls runs as a turn of its own, and no hook says it started, so while the screen
-        shows work the turn `wait` is after is not over. None when the worker is no longer tracked."""
+        A turn that is over is also checked against the transcript (see queue_pending): while a
+        queued prompt is still waiting to start, the turn `wait` is after is not over. When the
+        transcript can't tell, a finished turn is checked against the screen instead: while it
+        shows work, a queued prompt may be running. None when the worker is no longer tracked."""
         rec = self.reconcile(pane, look, recheck)
         if rec is None:
             return None
         view = wait_view(rec)
+        if view not in ("finished", "interrupted"):
+            return view
+        pending = queue_pending(rec)
+        if pending is not None:
+            return "busy" if pending else view
         if view != "finished":
             return view
         seen = look()
@@ -234,6 +267,13 @@ def _bump(rec):
     return rec["seq"]
 
 
+def _submitted(rec, seq, prompt_id):
+    """A prompt was submitted at `seq`: a UserPromptSubmit, or a queued start seen in the transcript.
+    Its prompt id is the turn interrupt markers are matched to."""
+    rec["submit_seq"] = seq
+    rec["submit_prompt_id"] = prompt_id
+
+
 def _set(rec, state, now, detail=""):
     if rec.get("state") != state:
         rec["state_since"] = now
@@ -246,14 +286,19 @@ def _set(rec, state, now, detail=""):
 
 def transcript_decision(rec):
     """What the transcript says about a busy/blocked worker: "interrupted" when an interrupt marker
-    belongs to its latest turn (matched by prompt id, never by order or time), "screen" when the
+    belongs to its latest turn (matched by prompt id, never by order or time), "finished" when that
+    turn is a recorded queued start whose end record is written (see below), "screen" when the
     transcript can't decide and the screen should (see reconcile_decision), else None: leave the
     record alone, the transcript or the next hook will settle it.
 
     The transcript can't decide when it is unreadable, holds no prompt record (an unknown format:
     fall back, don't guess) or not the latest turn's, when the hooks gave no prompt id, or when a
     busy turn has had no reply yet: an Escape before any reply streams rewinds the prompt and
-    writes nothing."""
+    writes nothing.
+
+    A queued turn's end record is written after its Stop hook ran. If the record still shows that
+    turn running, its start was written after its Stop (the Stop landed while the transcript was
+    showing the prompt but not yet the end): the turn is over."""
     state = rec.get("state")
     if state not in ("busy", "blocked"):
         return None
@@ -263,11 +308,39 @@ def transcript_decision(rec):
         return "screen"
     if facts.get("interrupted") == prompt_id:
         return "interrupted"
+    if (state == "busy" and facts.get("ended") == prompt_id == rec.get("queued_prompt_id")
+            and (rec.get("ended_seq") or 0) < (rec.get("submit_seq") or 0)):
+        return "finished"
     if facts.get("prompt") != prompt_id:
         return "screen"
     if state == "busy" and not facts.get("replied"):
         return "screen"
     return None
+
+
+def queued_start(rec):
+    """The promptId of a queued prompt that the transcript shows has started a turn of its own and
+    that is not recorded yet, else None. A queued prompt absorbed into the running turn writes no
+    prompt record, so it never starts one. A queued turn the transcript already shows ended is not
+    started either: its end record is written after its Stop hook ran, so that Stop is already on
+    the record, and a start written after it would leave `wait` waiting for a Stop that never comes."""
+    facts = rec.get("transcript") or {}
+    prompt_id = facts.get("prompt")
+    if facts.get("source") != "queued" or not prompt_id or facts.get("ended") == prompt_id:
+        return None
+    if prompt_id in (rec.get("submit_prompt_id"), rec.get("queued_prompt_id")):
+        return None
+    return prompt_id
+
+
+def queue_pending(rec):
+    """Whether the transcript shows a queued prompt still waiting to start: an open enqueue, or a
+    dequeue whose prompt record has not been written yet. None when the transcript can't tell:
+    unreadable, or no prompt record at all (an unknown format: fall back, don't guess)."""
+    facts = rec.get("transcript") or {}
+    if "prompt" not in facts:
+        return None
+    return bool(facts.get("queued") or facts.get("dequeued"))
 
 
 def reconcile_decision(state, heard_at, now, look, recheck):

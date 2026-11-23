@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 import fakes  # noqa: F401  (sets sys.path)
+from fakes import fixture
 
 from fleetlib import transcript as tr
 
@@ -114,6 +115,50 @@ class TurnFacts(TempFile):
         self.assertNotIn("prompt", tr.catch_up(seen, self.path))
         other = os.path.join(self.dir, "new.jsonl")
         self.assertNotIn("interrupted", tr.catch_up(seen, other))
+
+
+class QueuedFacts(TempFile):
+    """What catch_up remembers about queued prompts. Fixtures: tests/fixtures/transcript_*.jsonl."""
+
+    def records(self, name):
+        return [text + "\n" for text in fixture("transcript_%s.jsonl" % name).splitlines() if text.strip()]
+
+    def facts_after(self, lines):
+        self.append("".join(lines))
+        return tr.catch_up(None, self.path)
+
+    def test_queued_behind_a_turn_without_tool_calls(self):
+        lines = self.records("queued_no_tools")
+        seen = self.facts_after(lines[:3])  # prompt, enqueue, reply
+        self.assertEqual((seen["queued"], bool(seen.get("dequeued")), seen["source"]), (1, False, "typed"))
+        first = seen["prompt"]
+        self.append("".join(lines[3:6]))  # dequeue, then the first turn's end records
+        seen = tr.catch_up(seen, self.path)
+        self.assertEqual((seen["queued"], seen["dequeued"], seen.get("ended")), (0, True, None))
+        self.append(lines[6])  # the queued prompt
+        seen = tr.catch_up(seen, self.path)
+        self.assertEqual((seen["source"], seen["dequeued"], seen["replied"]), ("queued", False, False))
+        self.assertNotEqual(seen["prompt"], first)
+        self.append("".join(lines[7:]))
+        seen = tr.catch_up(seen, self.path)
+        self.assertEqual(seen["ended"], seen["prompt"])
+
+    def test_absorbed_into_a_turn_with_tool_calls(self):
+        seen = self.facts_after(self.records("queued_tools"))
+        self.assertEqual((seen["queued"], bool(seen.get("dequeued")), seen["source"]), (0, False, "typed"))
+        self.assertEqual(seen["ended"], seen["prompt"])
+
+    def test_send_now_and_an_interrupt_start_the_queued_prompt(self):
+        for name in ("send_now", "interrupt_with_queued"):
+            with self.subTest(name):
+                lines = self.records(name)
+                start = next(i for i, text in enumerate(lines) if json.loads(text).get("promptSource") == "queued")
+                seen = self.facts_after(lines[:start])
+                self.assertEqual((seen["queued"], seen["dequeued"], seen["source"]), (0, True, "typed"))
+                self.append("".join(lines[start:]))
+                seen = tr.catch_up(seen, self.path)
+                self.assertEqual((seen["source"], seen["dequeued"], seen["ended"]), ("queued", False, seen["prompt"]))
+                os.remove(self.path)
 
 
 if __name__ == "__main__":

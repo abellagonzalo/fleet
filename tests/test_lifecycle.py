@@ -5,6 +5,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 from fakes import fixture
 
@@ -173,14 +174,12 @@ class Turns(Worker):
         self.assertEqual(self.wait_view(), "starting")
 
 
-class TranscriptInterrupts(Worker):
-    """Escape and rejected or cancelled dialogs fire no hook: the transcript's interrupt marker ends
-    the turn. Fixtures: tests/fixtures/transcript_*.jsonl (#15)."""
+class TranscriptWorker(Worker):
+    """A worker whose transcript the test writes. Fixtures: tests/fixtures/transcript_*.jsonl (#15)."""
 
     def setUp(self):
         super().setUp()
         self.tpath = os.path.join(self.dir, "transcript.jsonl")
-        self.screen = "busy"  # the screen never decides here
         self.event("SessionStart", transcript_path=self.tpath)
 
     def records(self, name):
@@ -197,6 +196,15 @@ class TranscriptInterrupts(Worker):
         self.send()
         self.event("UserPromptSubmit", prompt="go", prompt_id=prompt["promptId"], transcript_path=self.tpath)
         return prompt["promptId"]
+
+
+class TranscriptInterrupts(TranscriptWorker):
+    """Escape and rejected or cancelled dialogs fire no hook: the transcript's interrupt marker ends
+    the turn."""
+
+    def setUp(self):
+        super().setUp()
+        self.screen = "busy"  # the screen never decides here
 
     def assert_interrupted(self):
         self.assertEqual(self.wait_view(), "interrupted")
@@ -301,6 +309,210 @@ class TranscriptInterrupts(Worker):
         self.write(recs)
         self.assert_interrupted()
         self.assertEqual(self.rec()["transcript"]["path"], self.tpath)
+
+
+class TranscriptQueuedPrompts(TranscriptWorker):
+    """A prompt sent while a worker is busy is queued. Its UserPromptSubmit fires when it is queued,
+    carrying the running turn's prompt id; when it later runs as a turn of its own no hook fires,
+    so the transcript says when it started. The screen stays quiet: only the transcript can keep
+    `wait` waiting."""
+
+    def setUp(self):
+        super().setUp()
+        self.screen = "quiet"
+
+    def first_index(self, recs, pred):
+        return next(i for i, r in enumerate(recs) if pred(r))
+
+    def queue(self, old_pid):
+        """`fleet send` while busy: the UserPromptSubmit at queue time names the running turn."""
+        self.send()
+        self.event("UserPromptSubmit", prompt="queued", prompt_id=old_pid, transcript_path=self.tpath)
+
+    def queued_prompt(self, recs):
+        return self.first_index(recs, lambda r: r.get("promptSource") == "queued")
+
+    def test_behind_a_turn_without_tool_calls(self):
+        recs = self.records("queued_no_tools")
+        old = self.submit(recs)
+        self.write(recs[:2])  # the first prompt and the enqueue
+        self.queue(old)
+        self.write(recs[2:3])
+        self.event("Stop", last_assistant_message="poem", prompt_id=old)
+        self.assertEqual(self.wait_view(), "busy")  # open enqueue
+        start = self.queued_prompt(recs)
+        self.write(recs[3:start])  # dequeue and the old turn's end records
+        self.assertEqual(self.wait_view(), "busy")  # dequeued, not started yet
+        self.write(recs[start:start + 2])
+        self.assertEqual(self.wait_view(), "busy")
+        r = self.rec()
+        self.assertEqual((r["state"], r["submit_prompt_id"]), ("busy", recs[start]["promptId"]))
+        self.write(recs[start + 2:])
+        self.event("Stop", last_assistant_message="banana", prompt_id=recs[start]["promptId"])
+        self.assertEqual(self.wait_view(), "finished")
+        self.assertEqual(self.rec()["last_message"], "banana")
+
+    def test_absorbed_into_a_turn_with_tool_calls(self):
+        recs = self.records("queued_tools")
+        old = self.submit(recs)
+        enqueue = self.first_index(recs, lambda r: r.get("operation") == "enqueue")
+        self.write(recs[:enqueue + 1])
+        self.queue(old)
+        self.assertEqual(self.wait_view(), "busy")
+        self.write(recs[enqueue + 1:])
+        seq = self.rec()["seq"]
+        self.event("Stop", last_assistant_message="both", prompt_id=old)
+        self.assertEqual(self.wait_view(), "finished")
+        r = self.rec()
+        self.assertEqual((r["submit_prompt_id"], r["seq"]), (old, seq + 1))  # no queued start written
+
+    def test_send_now_drops_the_running_turn(self):
+        recs = self.records("send_now")
+        old = self.submit(recs)
+        start = self.queued_prompt(recs)
+        self.write(recs[:2])  # the enqueue
+        self.queue(old)  # no Stop ever fires for the dropped turn
+        self.write(recs[2:start])  # dequeue and the aborted partial reply
+        self.assertEqual(self.wait_view(), "busy")
+        self.write(recs[start:start + 1])
+        self.assertEqual(self.wait_view(), "busy")
+        self.assertEqual(self.rec()["submit_prompt_id"], recs[start]["promptId"])
+        self.write(recs[start + 1:])
+        self.event("Stop", last_assistant_message="plum", prompt_id=recs[start]["promptId"])
+        self.assertEqual(self.wait_view(), "finished")
+
+    def test_an_interrupt_starts_the_queued_prompt(self):
+        recs = self.records("interrupt_with_queued")
+        old = self.submit(recs)
+        self.write(recs[:2])
+        self.queue(old)
+        start = self.queued_prompt(recs)
+        self.write(recs[2:start])  # dequeue, partial reply, the old turn's interrupt marker
+        self.assertEqual(self.wait_view(), "busy")  # the old turn is over; the queued one hasn't started
+        self.write(recs[start:start + 2])
+        self.assertEqual(self.wait_view(), "busy")
+        self.assertEqual((self.rec()["state"], self.rec()["submit_prompt_id"]), ("busy", recs[start]["promptId"]))
+        self.write(recs[start + 2:])
+        self.event("Stop", last_assistant_message="fig", prompt_id=recs[start]["promptId"])
+        self.assertEqual(self.wait_view(), "finished")
+
+    def test_escape_during_a_queued_turn(self):
+        recs = self.records("queued_no_tools")
+        old = self.submit(recs)
+        self.write(recs[:2])
+        self.queue(old)
+        start = self.queued_prompt(recs)
+        self.write(recs[2:start])
+        self.event("Stop", last_assistant_message="poem", prompt_id=old)
+        queued = recs[start]["promptId"]
+        marker = dict(self.records("interrupt_text")[-1], promptId=queued)
+        self.write(recs[start:start + 2])  # the queued prompt and its (partial) reply
+        self.assertEqual(self.wait_view(), "busy")
+        self.write([marker])
+        self.assertEqual(self.wait_view(), "interrupted")
+        r = self.rec()
+        self.assertEqual((r["state"], r["outcome"], r["ended_seq"]), ("idle", "interrupted", r["seq"]))
+
+    def test_a_queued_turn_that_ended_before_anyone_looked_is_not_started_again(self):
+        # both Stops land before a poll reads the queued prompt: its Stop is already on the record
+        recs = self.records("queued_no_tools")
+        old = self.submit(recs)
+        self.write(recs[:2])
+        self.queue(old)
+        self.write(recs[2:3])
+        self.event("Stop", last_assistant_message="poem", prompt_id=old)
+        self.write(recs[3:])
+        self.event("Stop", last_assistant_message="banana")
+        self.assertEqual(self.wait_view(), "finished")
+        self.assertEqual((self.rec()["state"], self.rec()["last_message"]), ("idle", "banana"))
+
+    def test_a_queued_start_is_dropped_if_an_event_landed_while_reading(self):
+        recs = self.records("queued_no_tools")
+        old = self.submit(recs)
+        self.write(recs[:2])
+        self.queue(old)
+        self.write(recs[2:3])
+        self.event("Stop", last_assistant_message="poem", prompt_id=old)
+        start = self.queued_prompt(recs)
+        self.write(recs[3:start + 2])  # the queued prompt and its reply, not its end yet
+        read = lc.tr.catch_up
+
+        def stop_while_reading(saved, path):
+            facts = read(saved, path)
+            self.event("Stop", last_assistant_message="banana")  # the queued turn's Stop
+            return facts
+        with mock.patch.object(lc.tr, "catch_up", stop_while_reading):
+            self.life.reconcile(self.PANE, self.look, self.look)
+        r = self.rec()
+        self.assertEqual((r["state"], r["outcome"], r["last_message"]), ("idle", "finished", "banana"))
+
+    def test_a_queued_start_is_written_once(self):
+        recs = self.records("queued_no_tools")
+        old = self.submit(recs)
+        self.write(recs[:2])
+        self.queue(old)
+        self.write(recs[2:3])
+        self.event("Stop", last_assistant_message="poem", prompt_id=old)
+        start = self.queued_prompt(recs)
+        self.write(recs[3:start + 1])
+        self.assertEqual(self.wait_view(), "busy")
+        seq = self.rec()["seq"]
+        self.assertEqual(self.wait_view(), "busy")
+        self.assertEqual(self.rec()["seq"], seq)  # nothing new to write
+        self.write(recs[start + 1:])
+        self.event("Stop", last_assistant_message="banana")
+        # the next prompt is submitted before its record is written: the transcript's latest prompt
+        # is still the queued one, which must not be started again
+        self.event("UserPromptSubmit", prompt="next", prompt_id="p-next")
+        seq = self.rec()["seq"]
+        self.assertEqual(self.wait_view(), "busy")
+        r = self.rec()
+        self.assertEqual((r["seq"], r["submit_prompt_id"]), (seq, "p-next"))
+
+    def test_a_transcript_without_prompt_records_falls_back_to_the_screen(self):
+        self.write([{"type": "something-else"}])
+        self.send()
+        self.event("UserPromptSubmit", prompt="go")
+        self.event("Stop")
+        self.screen = "busy"
+        self.assertEqual(self.wait_view(), "busy")
+        self.screen = "quiet"
+        self.t += 2
+        self.assertEqual(self.wait_view(), "finished")
+
+    def test_a_stop_that_beat_the_queued_start_still_ends_the_turn(self):
+        # The queued turn's Stop lands, then a poll reads its prompt before its end record is
+        # written, so the start is written after the Stop. The end record repairs it.
+        recs = self.records("queued_no_tools")
+        old = self.submit(recs)
+        self.write(recs[:2])
+        self.queue(old)
+        self.write(recs[2:3])
+        self.event("Stop", last_assistant_message="poem", prompt_id=old)
+        start = self.queued_prompt(recs)
+        self.write(recs[3:start + 2])  # up to the queued prompt's reply
+        self.event("Stop", last_assistant_message="banana")
+        self.assertEqual(self.wait_view(), "busy")
+        self.write(recs[start + 2:])  # its stop_hook_summary and turn_duration
+        self.assertEqual(self.wait_view(), "finished")
+        r = self.rec()
+        self.assertEqual((r["state"], r["outcome"], r["last_message"]), ("idle", "finished", "banana"))
+
+    def test_an_interrupted_queued_turn_is_not_started_again_by_the_next_prompt(self):
+        recs = self.records("queued_no_tools")
+        old = self.submit(recs)
+        self.write(recs[:2])
+        self.queue(old)
+        start = self.queued_prompt(recs)
+        self.write(recs[2:start + 2])
+        self.event("Stop", last_assistant_message="poem", prompt_id=old)
+        self.assertEqual(self.wait_view(), "busy")
+        self.write([dict(self.records("interrupt_text")[-1], promptId=recs[start]["promptId"])])
+        self.assertEqual(self.wait_view(), "interrupted")
+        self.send()
+        self.event("UserPromptSubmit", prompt="next", prompt_id="p-next")  # its record not written yet
+        self.assertEqual(self.wait_view(), "busy")
+        self.assertEqual((self.rec()["submit_prompt_id"], self.rec()["outcome"]), ("p-next", "interrupted"))
 
 
 class Dialogs(Worker):

@@ -56,4 +56,4 @@ A worker with nothing left to do until someone sends it a prompt: idle with no s
 _Avoid_: done, finished (that's a turn outcome)
 
 **Reconcile**:
-Correcting a worker's state when the hooks missed a change (interrupts, rejected or cancelled dialogs). The transcript decides first: an interrupt marker for the worker's latest turn ends it as interrupted at once. The screen is the fallback, once the state is old enough, when the transcript can't tell.
+Correcting a worker's state when the hooks missed a change (interrupts, rejected or cancelled dialogs). The transcript decides first: an interrupt marker for the worker's latest turn ends it as interrupted at once. A queued prompt the transcript shows starting a turn of its own is recorded like a submitted prompt (the worker is busy again). The screen is the fallback, once the state is old enough, when the transcript can't tell.
