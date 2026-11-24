@@ -10,7 +10,7 @@ All mechanics go through the `fleet` CLI, on PATH via `~/.local/bin/fleet` (`fle
 
 ## Authority
 
-- **Read freely**: `fleet status`, `fleet last`, `fleet read`, at any time.
+- **Read freely**: `fleet status`, `fleet last`, `fleet prompts`, `fleet read`, at any time.
 - **Send on the user's word**: draft the prompt, and send it only when the user dictated or approved it.
 - **Every dialog goes to the user**: when a worker is `blocked`, show them what the dialog asks (`fleet read`) and press keys only with their answer.
 - **`fleet rm` only when the user says to remove that worker.**
@@ -91,6 +91,7 @@ Before a worker gets its first task (`fleet new … --prompt-stdin`, or the firs
    - **Verification gate:** check that the repo has CI before you name it as a condition (`.github/workflows/` exists, or `gh pr checks` on a recent PR reports checks). Without CI, the gate is the full local test suite, named by its command (e.g. `python3 -m unittest discover -s tests`).
 3. **Put the agreed policy in full into each worker's first prompt**, even when it comes from the repo's `CLAUDE.md`. When a task spans several repos, each worker gets its own repo's policy.
 4. **Changing the policy mid-task is the exception.** If it happens, tell the user that each worker sees the change only after its current turn ends.
+5. **Recover the policy of a worker you didn't send work to in this session**: after your own `/clear`, or when you find a fleet already running. Before you relay its `Done:` or `Need input:` hand-off, or send it more work, run `fleet prompts <worker> 5`. It prints the prompts of the worker's last 5 turns, oldest first, each followed by `----`. A prompt fleet typed as `Read <file> …` or `/cmd … (also read <file> …)` is followed by `--- <file>` and that file's contents, and a queued prompt absorbed into a turn shows as `(absorbed) …`. Find the policy in the prompt that started the worker's current work. If it isn't there, look further back with a larger `n`. Check the hand-off against the policy you found, and tell the user which policy that was. If no prompt holds a policy, or a prompt file shows as `(prompt file missing: …)`, tell the user "no end-of-task policy found for <worker>" and ask for it. Never guess a policy, and never apply the defaults without saying so.
 
 The `## Fleet` section is free-form markdown read by agents, not parsed by the CLI. See the README for an example.
 

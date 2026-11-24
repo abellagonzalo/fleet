@@ -1,6 +1,7 @@
 """Commands against fake tmux/git/wt: argument parsing, target resolution, send, wait, broadcast,
 status, keys, rm, new, up."""
 
+import datetime
 import io
 import json
 import os
@@ -14,6 +15,7 @@ from fakes import Clock, FakeTmux, box_screen, fixture, make_ctx
 from fleetlib import args as A
 from fleetlib import cli
 from fleetlib import lifecycle as lc
+from fleetlib import prompts as pm
 from fleetlib import state as st
 from fleetlib.errors import FleetError
 
@@ -51,6 +53,13 @@ class Args(unittest.TestCase):
             with self.assertRaises(A.UsageError, msg=bad) as e:
                 A.parse_new(bad)
             self.assertIn(msg, str(e.exception), bad)
+
+    def test_prompts(self):
+        self.assertEqual(A.parse_prompts(["w"]), {"name": "w", "n": 1})
+        self.assertEqual(A.parse_prompts(["w", "5"]), {"name": "w", "n": 5})
+        for bad in ([], ["w", "x"], ["w", "1", "2"]):
+            with self.assertRaises(A.UsageError, msg=bad):
+                A.parse_prompts(bad)
 
     def test_status(self):
         self.assertEqual(A.parse_status([]), {"json": False})
@@ -962,6 +971,130 @@ class LastAndRead(Fleet):
     def test_read_drops_blank_lines(self):
         self.a.shown = "a\n\nb\n\n"
         self.assertEqual(self.run_cmd("read", "alpha")[1], "a\nb\n")
+
+
+
+def user_rec(pid, content, at=None, **kw):
+    rec = {"type": "user", "promptId": pid, "message": {"content": content}}
+    if at is not None:
+        rec["timestamp"] = datetime.datetime.fromtimestamp(at, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+    rec.update(kw)
+    return rec
+
+
+class Prompts(Fleet):
+    """`fleet prompts`: what a worker was told, policy included, for an orchestrator that didn't send it."""
+
+    PROMPT = "Fix the bug.\n\nEnd-of-task policy: tests pass, PR open, the worker merges.\n"
+
+    def transcript(self, *recs, name="t.jsonl"):
+        tp = os.path.join(self.dir, name)
+        with open(tp, "a") as f:
+            f.write("".join(json.dumps(r) + "\n" for r in recs))
+        return tp
+
+    def send_stdin(self, content):
+        self.ctx.stdin = io.StringIO(content)
+        self.assertEqual(self.run_cmd("send", "--prompt-stdin", "alpha")[0], 0)
+        return self.a.submitted[-1][0]
+
+    def test_prints_the_saved_prompt_file_after_the_typed_line(self):
+        sent = self.send_stdin(self.PROMPT)
+        path = sent[len("Read "):-len(" and do what it says.")]
+        tp = self.transcript(user_rec("p1", sent, promptSource="typed"), text_rec("on it"))
+        self.track(self.a, transcript_path=tp)
+        self.assertEqual(self.run_cmd("prompts", "alpha"),
+                         (0, "%s\n--- %s\n%s\n----\n" % (sent, path, self.PROMPT.rstrip("\n")), ""))
+
+    def test_a_slash_command_prints_its_also_read_file(self):
+        sent = self.send_stdin("/implement #22\n\n" + self.PROMPT)
+        self.assertTrue(sent.startswith("/implement #22 (also read "), sent)
+        path = sent[len("/implement #22 (also read "):-len(" and follow it)")]
+        # Claude Code writes a command sent to the model as markup, without promptSource.
+        markup = ("<command-message>implement</command-message>\n<command-name>/implement</command-name>\n"
+                  "<command-args>%s</command-args>" % sent[len("/implement "):])
+        tp = self.transcript(user_rec("p1", markup),
+                             user_rec("p1", [{"type": "text", "text": "skill body"}], isMeta=True))
+        self.track(self.a, transcript_path=tp)
+        out = self.run_cmd("prompts", "alpha")[1]
+        self.assertEqual(out, "%s\n--- %s\n%s\n----\n" % (sent, path, self.PROMPT.rstrip("\n")))
+
+    def test_last_n_turns_oldest_first_with_typed_absorbed_and_in_progress(self):
+        tp = self.transcript(
+            {"type": "user", "content": "x"},  # not a prompt record
+            user_rec(None, "<command-name>/clear</command-name>"),  # a local command: no promptId
+            user_rec("p1", "first", promptSource="typed"), text_rec("one"), END_REC,
+            user_rec("p2", "second", promptSource="typed"), TOOL_REC,
+            user_rec("p2", [{"type": "tool_result", "content": "ok"}]),
+            {"type": "attachment", "attachment": {"type": "queued_command", "prompt": "and also this"}},
+            text_rec("two"), END_REC,
+            user_rec("p3", "typed in the pane", promptSource="typed"),
+            user_rec("p3", [{"type": "text", "text": "[Request interrupted by user]"}]),
+            user_rec("p4", "still running", promptSource="queued"), TOOL_REC)
+        self.track(self.a, transcript_path=tp)
+        self.assertEqual(self.run_cmd("prompts", "alpha", "3")[1],
+                         "second\n(absorbed) and also this\n----\ntyped in the pane\n----\nstill running\n----\n")
+        self.assertEqual(self.run_cmd("prompts", "alpha", "9")[1].count("----"), 4)
+
+    def test_a_missing_prompt_file_is_reported_and_the_rest_still_prints(self):
+        gone = os.path.join(self.dir, "prompts", "gone.md")
+        tp = self.transcript(user_rec("p1", "Read %s and do what it says." % gone, promptSource="typed"),
+                             user_rec("p2", "next", promptSource="typed"))
+        self.track(self.a, transcript_path=tp)
+        self.assertEqual(self.run_cmd("prompts", "alpha", "2"),
+                         (0, "Read %s and do what it says.\n(prompt file missing: %s)\n----\nnext\n----\n"
+                          % (gone, gone), ""))
+
+    def test_prompts_sent_before_a_worker_clear_come_from_the_record(self):
+        t0 = self.clock.now()
+        sent = self.send_stdin(self.PROMPT)  # recorded at t0
+        self.clock.t += 60
+        self.run_cmd("send", "alpha", "keep going")  # also in the new transcript below
+        tp = self.transcript(user_rec(None, "<command-name>/clear</command-name>", at=t0 + 30),
+                             user_rec("p9", "keep going", at=t0 + 60, promptSource="typed"), name="new.jsonl")
+        self.track(self.a, transcript_path=tp, sent_prompts=self.rec(self.a)["sent_prompts"])
+        out = self.run_cmd("prompts", "alpha", "5")[1]
+        self.assertTrue(out.startswith(sent + "\n--- "), out)
+        self.assertTrue(out.endswith("----\nkeep going\n----\n"), out)
+        self.assertEqual(out.count("keep going"), 1)
+
+    def test_without_timestamps_the_transcript_shows_everything(self):
+        self.run_cmd("send", "alpha", "go")
+        tp = self.transcript(user_rec("p1", "go", promptSource="typed"))
+        self.track(self.a, transcript_path=tp, sent_prompts=self.rec(self.a)["sent_prompts"])
+        self.assertEqual(self.run_cmd("prompts", "alpha", "5")[1], "go\n----\n")
+
+    def test_without_transcript_the_record_stands_in(self):
+        self.assertEqual(self.run_cmd("prompts", "alpha")[1], "(no prompt yet)\n")
+        self.run_cmd("send", "alpha", "hello")
+        self.assertEqual(self.run_cmd("prompts", "alpha")[1], "hello\n----\n")
+
+    def test_the_record_keeps_the_last_ten_sends(self):
+        for i in range(12):
+            self.run_cmd("send", "--force", "alpha", "msg %d" % i)
+        self.assertEqual([s["text"] for s in self.rec(self.a)["sent_prompts"]], ["msg %d" % i for i in range(2, 12)])
+
+    def test_real_transcripts(self):
+        # The Claude Code 2.1.330 fixtures: an absorbed queued prompt, a queued prompt that ran as its
+        # own turn, and an early Escape whose dropped prompt was still sent.
+        for name, expected in (
+                ("queued_tools", [("Use the Read tool", ["Then also reply with the word cherry."])]),
+                ("queued_no_tools", [("Write a 300-word poem", []), ("Reply with just the word banana.", [])]),
+                ("rewind", [("Write a 400-word essay about clocks", []), ("Reply with just the word lime.", [])]),
+                ("clear", [])):
+            with self.subTest(name):
+                recs = [json.loads(l) for l in fixture("transcript_%s.jsonl" % name).splitlines()]
+                got = pm.from_records(recs)
+                self.assertEqual([p["absorbed"] for p in got], [a for _, a in expected])
+                for p, (start, _) in zip(got, expected):
+                    self.assertTrue(p["text"].startswith(start), p["text"])
+
+    def test_untracked_worker(self):
+        self.assertEqual(self.run_cmd("prompts", "shell")[0], 1)
+        st.Store.remove(self.ctx.store.path(self.b.id))
+        code, _, err = self.run_cmd("prompts", "beta")
+        self.assertEqual(code, 1)
+        self.assertIn("not", err)
 
 
 class Rm(Fleet):

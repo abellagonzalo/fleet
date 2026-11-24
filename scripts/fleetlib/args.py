@@ -238,6 +238,10 @@ def parse_last(args):
     return _name_and_count(args, "usage: fleet last <worker> [n]", 1, "n")
 
 
+def parse_prompts(args):
+    return _name_and_count(args, "usage: fleet prompts <worker> [n]", 1, "n")
+
+
 def parse_keys(args):
     if len(args) < 2 or not args[0]:
         raise UsageError("usage: fleet keys <worker> <tmux-key>...")

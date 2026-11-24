@@ -18,6 +18,7 @@ import time
 from . import args as A
 from . import lifecycle as lc
 from . import roster as R
+from . import prompts as pm
 from . import replies as rp
 from . import screen as S
 from . import state as st
@@ -76,6 +77,9 @@ fleet watch [--to w1,w2] [timeout_s]           for Claude Code's Monitor: one li
                                                exit 2 with "watch: timeout after Ns, still busy: ..." at timeout_s
                                                (default 1800); exit 1 on an unknown worker or no workers
 fleet last <worker> [n]                        last n assistant replies from the transcript (default 1)
+fleet prompts <worker> [n]                     prompts of its last n turns (default 1), oldest first, each followed
+                                               by ----; a prompt file fleet typed "Read <file>" for is printed
+                                               after it, and a queued prompt absorbed into the turn as (absorbed)
 fleet read <worker> [lines]                    the screen plus <lines> of scrollback (default 60)
 fleet keys <worker> <tmux-key>...              raw keys for dialogs: Enter, Escape, Up, Down, BTab, 1, 2...
 fleet rm <worker> [--force] [--keep-branch | -D]
@@ -400,7 +404,7 @@ def send(ctx, w, text, now=False, force=False, form=""):
                              screen=scr.tail(8))
     if ctx.lifecycle.is_tracked(pane):
         # before the key press, so the prompt's UserPromptSubmit and Stop are ordered after it
-        ctx.lifecycle.prompt_sent(pane)
+        ctx.lifecycle.prompt_sent(pane, text)
     term.submit(now=now)
     ctx.say("sent%s to %s%s: %s" % (" (now)" if now else "", name, form_note(form), text))
     return 0
@@ -763,6 +767,35 @@ def cmd_last(ctx, argv):
     return last(ctx, roster(ctx).worker(o["name"]), o["n"])
 
 
+def prompts(ctx, w, n):
+    """The prompts of worker `w`'s last n turns (a Roster handle), oldest first, each with the
+    contents of the prompt file it points to (see prompts.referenced_file)."""
+    rec = ctx.lifecycle.load(R.require_worker(w).pane)
+    if rec is None:
+        raise FleetError("'%s' is no longer tracked (its state file is gone)" % w.name)
+    picked = pm.recent(rec, n)
+    if not picked:
+        ctx.say("(no prompt yet)")
+        return 0
+    for p in picked:
+        ctx.say(p["text"])
+        path = pm.referenced_file(p["text"])
+        if path:
+            content = pm.file_text(path)
+            if content is None:
+                ctx.say("(prompt file missing: %s)" % path)
+            else:
+                ctx.say("--- %s" % path, content.rstrip("\n"))
+        ctx.say(*("(absorbed) %s" % a for a in p["absorbed"]))
+        ctx.say("----")
+    return 0
+
+
+def cmd_prompts(ctx, argv):
+    o = A.parse_prompts(argv)
+    return prompts(ctx, roster(ctx).worker(o["name"]), o["n"])
+
+
 def cmd_keys(ctx, argv):
     o = A.parse_keys(argv)
     pane = roster(ctx).lookup(o["name"]).pane
@@ -830,7 +863,7 @@ def cmd_rm(ctx, argv):
 
 COMMANDS = {
     "up": cmd_up, "new": cmd_new, "status": cmd_status, "send": cmd_send, "wait": cmd_wait,
-    "read": cmd_read, "last": cmd_last, "keys": cmd_keys, "rm": cmd_rm, "broadcast": cmd_broadcast,
+    "read": cmd_read, "last": cmd_last, "prompts": cmd_prompts, "keys": cmd_keys, "rm": cmd_rm, "broadcast": cmd_broadcast,
     "watch": cmd_watch,
 }
 
