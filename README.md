@@ -48,6 +48,7 @@ also run them yourself from any shell:
     fleet wait PROJ-123      # block until it finishes or needs you
     fleet watch              # one line per finished, blocked or exited worker, until all are settled
     fleet last PROJ-123 [n]  # the replies of its last n turns (default 1)
+    fleet prompts PROJ-123 [n]  # the prompts of its last n turns, with the prompt files they point to
     fleet rm PROJ-123        # close the window, remove the worktree if clean, delete the branch if merged
 
 `fleet help` lists every command and flag.
@@ -103,6 +104,17 @@ catch up. `fleet status` shows the latest turn's reply in its REPLY column (80 c
 while the worker is busy or blocked, after an interrupted turn, and before any turn (a fresh session
 or after `/clear`). `status --json` gives it in full as `reply`. When the transcript can't be read,
 or doesn't catch up in time, the Stop hook's copy of a finished turn's reply stands in.
+
+**Prompts.** `fleet prompts <worker> [n]` prints the prompts of the last n turns (default 1),
+oldest first, each followed by `----`: what the worker was told, including the end-of-task policy,
+for an orchestrator that didn't send it (after its `/clear`, or attached to a running fleet). It
+reads them from the transcript, so prompts typed straight into the pane and a turn still running
+show too. When a prompt is fleet's `Read <file> and do what it says.` or a slash command with
+`(also read <file> and follow it)`, the file's contents follow as `--- <file>`, or
+`(prompt file missing: <file>)` if it is gone. A queued prompt absorbed into a turn shows as
+`(absorbed) <text>`. Fleet also keeps the last 10 prompts it sent on the worker record, and these
+stand in for the prompts the current transcript doesn't show: those sent before the worker's own
+`/clear`, or all of them when there is no transcript.
 
 **Hand-offs.** The worker skill makes every reply open with a headline that fits in `fleet status`:
 `Done: ...`, `Need input: ...` or `Failed: ...`. A worker whose finished turn says `Need input:` is

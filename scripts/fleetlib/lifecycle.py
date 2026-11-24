@@ -16,6 +16,9 @@ The record (one JSON file per worker):
     heard_at     epoch seconds of the last state-setting event or screen correction (staleness)
     seq          bumped by every write; the only clock events are ordered by
     sent_seq     seq of the last `fleet send`
+    sent_prompts the last prompts fleet typed into the worker, oldest first: [{"text", "at": epoch
+                 seconds}], at most prompts.KEEP_SENT. `fleet prompts` falls back to it for
+                 prompts its current transcript doesn't show (sent before a `/clear`)
     submit_seq   seq of the last prompt submitted (UserPromptSubmit, or a queued start seen in the
                  transcript)
     ended_seq    seq of the last turn end (Stop, or an interrupt seen in the transcript or on screen)
@@ -30,6 +33,7 @@ The record (one JSON file per worker):
 Records written by older versions of fleet are not read correctly: restart workers after upgrading.
 """
 
+from . import prompts as pr
 from . import replies as rp
 from . import state as st
 
@@ -118,14 +122,17 @@ class Lifecycle:
 
         return self._change(pane, change, mirror=bool(EVENT_STATE[event]))
 
-    def prompt_sent(self, pane):
-        """`fleet send` is about to submit a prompt. Called before the key press, so the prompt's own
-        UserPromptSubmit (and a quick turn's Stop) always come after it."""
+    def prompt_sent(self, pane, text=None):
+        """`fleet send` is about to submit prompt `text`. Called before the key press, so the prompt's
+        own UserPromptSubmit (and a quick turn's Stop) always come after it."""
         now = self.now()
 
         def change(rec):
             rec["sent_seq"] = _bump(rec)
             _set(rec, "busy", now)
+            if text is not None:
+                sent = (rec.get("sent_prompts") or []) + [{"text": text, "at": now}]
+                rec["sent_prompts"] = sent[-pr.KEEP_SENT:]
 
         return self._change(pane, change)
 
