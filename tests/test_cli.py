@@ -1075,13 +1075,14 @@ class Prompts(Fleet):
         self.assertEqual([s["text"] for s in self.rec(self.a)["sent_prompts"]], ["msg %d" % i for i in range(2, 12)])
 
     def test_real_transcripts(self):
-        # The Claude Code 2.1.330 fixtures: an absorbed queued prompt, a queued prompt that ran as its
-        # own turn, and an early Escape whose dropped prompt was still sent.
+        # The Claude Code fixtures: an absorbed queued prompt, a queued prompt that ran as its own turn,
+        # an early Escape whose dropped prompt was still sent, and a slash command after a typed prompt.
         for name, expected in (
                 ("queued_tools", [("Use the Read tool", ["Then also reply with the word cherry."])]),
                 ("queued_no_tools", [("Write a 300-word poem", []), ("Reply with just the word banana.", [])]),
                 ("rewind", [("Write a 400-word essay about clocks", []), ("Reply with just the word lime.", [])]),
-                ("clear", [])):
+                ("clear", []),
+                ("slash_command", [("Reply with just the word kiwi.", []), ("/fruit lime", [])])):
             with self.subTest(name):
                 recs = [json.loads(l) for l in fixture("transcript_%s.jsonl" % name).splitlines()]
                 got = pm.from_records(recs)

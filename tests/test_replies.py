@@ -96,6 +96,20 @@ class Split(unittest.TestCase):
     def test_a_cleared_session_has_no_turn_yet(self):
         self.assertEqual(rp.split(records("clear")), [])
 
+    def test_a_slash_command_starts_a_turn_of_its_own(self):
+        # Its prompt record has no promptSource (Claude Code 2.1.331): after a typed turn, and alone.
+        self.assertEqual(replies("slash_command"), [("bd1b6e21", "kiwi"), ("41ceb2f8", "lime")])
+        recs = records("slash_command")
+        command = next(i for i, r in enumerate(recs) if "<command-name>/fruit" in str(r.get("message")))
+        self.assertEqual([(t["prompt"][:8], t["text"]) for t in rp.split(recs[command:])], [("41ceb2f8", "lime")])
+
+    def test_a_slash_command_after_a_running_turn_cuts_it_short(self):
+        command = {"type": "user", "promptId": "p2", "message": {"content": "<command-name>/go</command-name>"}}
+        body = {"type": "user", "promptId": "p2", "isMeta": True, "message": {"content": [{"type": "text", "text": "Go."}]}}
+        self.assertEqual([(t["prompt"], t["end"], t["text"]) for t in rp.split(
+            [prompt("p1"), text("Looking."), command, body, text("went"), end()])],
+            [("p1", "interrupted", None), ("p2", "finished", "went")])
+
     def test_a_running_turn_has_no_end_yet(self):
         self.assertEqual(rp.split([prompt("p1"), text("Let me look.")]),
                          [{"prompt": "p1", "end": None, "text": "Let me look."}])

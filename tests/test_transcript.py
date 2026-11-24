@@ -117,6 +117,33 @@ class TurnFacts(TempFile):
         self.assertNotIn("interrupted", tr.catch_up(seen, other))
 
 
+class SlashCommandFacts(TempFile):
+    """A slash command's prompt record has no promptSource (fixture: transcript_slash_command.jsonl)."""
+
+    def test_its_turn_is_the_latest_turn_until_it_ends(self):
+        lines = [t + "\n" for t in fixture("transcript_slash_command.jsonl").splitlines() if t.strip()]
+        command = next(i for i, t in enumerate(lines) if "<command-name>/fruit" in t)
+        self.append("".join(lines[:command + 2]))  # up to the command's isMeta body
+        seen = tr.catch_up(None, self.path)
+        pid = json.loads(lines[command])["promptId"]
+        self.assertEqual((seen["prompt"], seen["source"], seen["replied"]), (pid, None, False))
+        self.assertNotEqual(seen["ended"], pid)  # the typed turn before it ended
+        self.append("".join(lines[command + 2:]))
+        seen = tr.catch_up(seen, self.path)
+        self.assertEqual((seen["prompt"], seen["replied"], seen["ended"]), (pid, True, pid))
+
+    def test_its_own_records_do_not_start_another_turn(self):
+        command = {"type": "user", "promptId": "p1", "message": {"content": "<command-name>/go</command-name>"}}
+        body = {"type": "user", "promptId": "p1", "isMeta": True, "message": {"content": [{"type": "text", "text": "Go."}]}}
+        self.assertTrue(tr.is_prompt(command, None))
+        self.assertFalse(tr.is_prompt(command, "p1"))
+        self.assertFalse(tr.is_prompt(body, None))
+        self.assertFalse(tr.is_prompt(dict(command, promptId=None), None))  # e.g. /clear: no turn
+        marker = {"type": "user", "promptId": "p2", "message": {"content": [
+            {"type": "text", "text": "[Request interrupted by user]"}]}}
+        self.assertFalse(tr.is_prompt(marker, "p1"))  # even one written under another promptId
+
+
 class QueuedFacts(TempFile):
     """What catch_up remembers about queued prompts. Fixtures: tests/fixtures/transcript_*.jsonl."""
 
