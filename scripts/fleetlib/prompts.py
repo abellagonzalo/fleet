@@ -6,9 +6,9 @@ queued prompt absorbed into it. The worker record's list of prompts fleet sent (
 see lifecycle.prompt_sent) covers what the transcript no longer shows: prompts sent before the
 worker's current session began, e.g. before it ran `/clear`.
 
-A prompt is the first user record of a new promptId that isn't Claude Code's own (isMeta) or a
-tool result. Keying on promptSource would miss slash commands: Claude Code writes the
-`<command-name>` record of a command sent to the model without one.
+A prompt is a prompt record, as transcript.is_prompt defines it for every reader of the transcript:
+the first user record of a new promptId that isn't Claude Code's own (isMeta), a tool result or an
+interrupt marker, so a slash command (written without promptSource) counts.
 """
 
 import datetime
@@ -53,12 +53,9 @@ def from_records(records):
     prompts, current = [], None
     for r in records:
         kind = r.get("type")
-        if kind == "user" and not r.get("isMeta"):
-            pid = r.get("promptId")
-            text = "\n".join(tr.texts(r))
-            if pid and pid != current and text and not any(t in tr.INTERRUPT_MARKERS for t in tr.texts(r)):
-                current = pid
-                prompts.append({"text": as_typed(text), "absorbed": []})
+        if tr.is_prompt(r, current):
+            current = r.get("promptId")
+            prompts.append({"text": as_typed("\n".join(tr.texts(r))), "absorbed": []})
         elif kind == "attachment" and prompts:
             att = r.get("attachment") or {}
             if att.get("type") == "queued_command" and att.get("prompt"):

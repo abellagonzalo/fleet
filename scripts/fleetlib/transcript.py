@@ -6,6 +6,8 @@
   prompt queue (the facts lifecycle.py decides interrupts and queued starts from). Saved on the
   worker record between reads. `folds` lets a caller keep facts of its own from the same records
   (replies.py keeps the latest turn).
+- `is_prompt(rec, current)`: whether a record starts a turn. The one definition of a prompt record,
+  for the facts here, the turn split behind replies and `fleet prompts`.
 - `texts(rec)`: the text blocks of a record's message.
 
 A missing or unreadable file, or a line that isn't a JSON object, is no news, never an error. The
@@ -43,10 +45,11 @@ def catch_up(saved, path, folds=None):
     """The worker's saved transcript facts after reading what is new in `path`: the position (see
     follow) plus what the records so far say about the latest turn:
 
-        prompt       promptId of the latest prompt record (absent: none seen, format unknown)
+        prompt       promptId of the latest prompt record (see is_prompt; absent: none seen, format
+                     unknown)
         source       that record's promptSource: "typed", or "queued" for a queued prompt that runs
                      as a turn of its own (behind a turn without tool calls, or after `send --now`
-                     or an Escape)
+                     or an Escape). None for a slash command, written without one.
         replied      whether an assistant record came after that prompt
         interrupted  promptId of the latest interrupt marker: Escape during text or a tool call, or
                      a rejected or cancelled dialog. A rejection with feedback writes none.
@@ -88,7 +91,7 @@ def _parse(raw):
 
 def _observe(facts, rec):
     kind = rec.get("type")
-    if kind == "user" and "promptSource" in rec:
+    if is_prompt(rec, facts.get("prompt")):
         facts["prompt"], facts["source"], facts["replied"] = rec.get("promptId"), rec.get("promptSource"), False
         facts["dequeued"] = False
     elif kind == "queue-operation":
@@ -103,6 +106,23 @@ def _observe(facts, rec):
         facts["replied"] = True
     elif kind == "user" and any(t in INTERRUPT_MARKERS for t in texts(rec)):
         facts["interrupted"] = rec.get("promptId")
+
+
+def is_prompt(rec, current):
+    """Whether `rec` is a prompt record: the user record that starts a turn (GLOSSARY: *Turn*).
+    `current` is the promptId of the latest prompt record before it (None: none yet).
+
+    It is the first user record of a new promptId that isn't Claude Code's own (isMeta), a tool
+    result or an interrupt marker; a record with promptSource always is one. Keying on promptSource
+    alone would miss slash commands: Claude Code writes the `<command-name>` record of a command
+    sent to the model without one, followed by an isMeta record (the command's body) with the same
+    promptId."""
+    if rec.get("type") != "user" or rec.get("isMeta"):
+        return False
+    if "promptSource" in rec:
+        return True
+    pid, found = rec.get("promptId"), texts(rec)
+    return bool(pid) and pid != current and any(found) and not any(t in INTERRUPT_MARKERS for t in found)
 
 
 def texts(rec):

@@ -110,7 +110,7 @@ def split(records):
 
 def _step(turns, rec):
     kind = rec.get("type")
-    if kind == "user" and "promptSource" in rec:
+    if tr.is_prompt(rec, turns[-1]["prompt"] if turns else None):
         if turns and turns[-1]["end"] is None:  # cut short: `send --now`, or an early Escape
             _interrupted(turns[-1])
         turns.append({"prompt": rec.get("promptId"), "end": None, "text": None})

@@ -1,7 +1,7 @@
 """Pins what fleet would rely on in Claude Code's (undocumented) JSONL transcript format.
 
 The fixtures under tests/fixtures/transcript_*.jsonl are scrubbed excerpts of real Claude Code
-2.1.330 transcripts (see
+2.1.330 transcripts (2.1.331 for slash_command; see
 README, "Tests"). Findings: issue #15. If a test here fails against a fresh capture, Claude Code
 changed the transcript format and the transcript-based state checks (#16, #17, #18) need a look.
 
@@ -197,6 +197,39 @@ class QueuedPrompts(unittest.TestCase):
         self.assertLess(first_index(recs, lambda r: r.get("operation") == "dequeue"), marker)
         self.assertEqual(turn_view(recs[:marker + 1]), ("busy", 0))
         self.assertEqual(turn_view(recs), ("finished", 0))
+
+
+class SlashCommands(unittest.TestCase):
+    """Captured from Claude Code 2.1.331: `/clear`, a typed prompt, then a custom slash command that
+    makes one tool call."""
+
+    def test_a_slash_command_prompt_record_has_no_prompt_source(self):
+        recs = load("slash_command")
+        command = first_index(recs, lambda r: "<command-name>/fruit</command-name>" in "".join(texts(r)))
+        rec, body = recs[command], recs[command + 1]
+        self.assertNotIn("promptSource", rec)
+        self.assertFalse(rec.get("isMeta"))
+        self.assertIn("<command-args>lime</command-args>", texts(rec)[0])
+        # Then Claude Code's own record with the command's body, under the same promptId.
+        self.assertTrue(body["isMeta"])
+        self.assertEqual(body["promptId"], rec["promptId"])
+        previous = [r["promptId"] for r in recs[:command] if r.get("promptId")]
+        self.assertNotIn(rec["promptId"], previous)  # a new promptId starts the turn
+
+    def test_its_turn_carries_its_prompt_id_and_ends_with_turn_duration(self):
+        recs = load("slash_command")
+        command = first_index(recs, lambda r: "<command-name>/fruit</command-name>" in "".join(texts(r)))
+        users = [r for r in recs[command:] if r.get("type") == "user"]
+        self.assertEqual({r["promptId"] for r in users}, {recs[command]["promptId"]})
+        results = [c for r in users if isinstance(message_content(r), list) for c in message_content(r)
+                   if c.get("type") == "tool_result"]
+        self.assertEqual(len(results), 1)
+        self.assertTrue(is_turn_end(recs[-1]))
+        self.assertEqual(texts(recs[-3]), ["lime"])
+
+    def test_a_typed_prompt_still_has_one(self):
+        recs = load("slash_command")
+        self.assertEqual([r["promptSource"] for r in recs if is_prompt(r)], ["typed"])
 
 
 class Clear(unittest.TestCase):
